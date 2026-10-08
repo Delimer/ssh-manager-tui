@@ -72,9 +72,9 @@ layout that stacks the panes on narrow terminals.
 - **SFTP** — without leaving the TUI: open an **interactive SFTP session** (`F`), run a
   **guided one-shot transfer**, or browse with a **dual-pane file browser** (`b`) that
   walks the remote and local trees side by side and transfers a file with `Enter`.
-  In the browser, `n` creates a directory, `N` an empty file, `R` renames the
-  selected item, and `Delete` removes it after confirmation (including nested
-  directories). `C` copies a selected directory and its contents to the other
+  In the browser, `F7` creates a directory, `Shift+N` an empty file, `F6` renames the
+  selected item, and `F8` removes it after confirmation (including nested
+  directories). `F5` copies a selected directory and its contents to the other
   pane; it refuses an existing destination. File transfers still use `Enter`.
   Single-file transfers are **atomic** (an interruption never truncates an existing file) and
   **prompt before overwriting**. A stored vault password / key passphrase auto-fills the
@@ -220,6 +220,11 @@ remove, `Enter` commit, `Esc` revert the field.
 | `Enter` | transfer marked files; otherwise enter a directory or transfer the cursor file (prompts before overwriting) |
 | `Esc` | clear marked files on both panes; close when nothing is marked |
 | `F4` / `e` | edit the focused remote file with `$VISUAL`, then `$EDITOR` |
+| `F5` | copy the selected directory and its contents to the other pane |
+| `F6` | rename the selected file or directory |
+| `F7` | create a directory in the focused pane |
+| `F8` | delete the selected file or directory after confirmation |
+| `Shift+N` | create an empty file in the focused pane |
 | `Backspace` | go up a directory |
 | `F` | open a full interactive SFTP session to the host |
 | `r` | retry / refresh the remote listing · `?` help |

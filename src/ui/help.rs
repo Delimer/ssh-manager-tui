@@ -124,11 +124,16 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             ));
             lines.push(key("F4 / e", "edit a remote file with VISUAL / EDITOR"));
             lines.push(key(
-                "n / N",
-                "create directory / empty file in focused pane",
+                "F5 / C",
+                "copy selected directory with its subdirectories",
             ));
-            lines.push(key("R / Delete", "rename / delete selected item"));
-            lines.push(key("C", "copy selected directory with its subdirectories"));
+            lines.push(key("F6 / R", "rename selected item"));
+            lines.push(key("F7 / n", "create directory in focused pane"));
+            lines.push(key(
+                "F8 / Delete / d",
+                "delete selected item (confirm first)",
+            ));
+            lines.push(key("Shift+N", "create empty file in focused pane"));
             lines.push(key("Backspace", "go up one directory"));
             lines.push(key("r", "refresh the focused pane"));
             lines.push(key(

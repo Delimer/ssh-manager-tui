@@ -3541,20 +3541,20 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
         KeyCode::Char('j') | KeyCode::Down => browser_move(app, 1),
         KeyCode::Char('k') | KeyCode::Up => browser_move(app, -1),
         KeyCode::F(4) | KeyCode::Char('e') => start_remote_edit(app),
-        KeyCode::Char('n') => start_sftp_name(app, SftpNameAction::CreateDir),
+        KeyCode::F(7) | KeyCode::Char('n') => start_sftp_name(app, SftpNameAction::CreateDir),
         KeyCode::Char('N') => start_sftp_name(app, SftpNameAction::CreateFile),
-        KeyCode::Char('R') => {
+        KeyCode::F(6) | KeyCode::Char('R') => {
             if let Some((name, _)) = selected_browser_item(app) {
                 start_sftp_name(app, SftpNameAction::Rename { old: name });
             }
         }
-        KeyCode::Delete | KeyCode::Char('d') => {
+        KeyCode::F(8) | KeyCode::Delete | KeyCode::Char('d') => {
             if let Some((name, is_dir)) = selected_browser_item(app) {
                 let pane = app.sftp_browser.as_ref().unwrap().focus;
                 open_confirm(app, ConfirmAction::DeleteBrowserItem { pane, name, is_dir });
             }
         }
-        KeyCode::Char('C') => copy_browser_directory(app),
+        KeyCode::F(5) | KeyCode::Char('C') => copy_browser_directory(app),
         KeyCode::Char('r') => browser_refresh(app),
         KeyCode::Backspace => browser_up(app),
         KeyCode::Enter => return browser_activate(app, terminal),
