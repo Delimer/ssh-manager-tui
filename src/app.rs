@@ -328,6 +328,7 @@ pub enum ConfirmAction {
     DeleteVaultEntry(usize),
     /// Overwrite an existing SFTP transfer destination. The browser has validated the
     /// name and confirmed the destination exists; `y` re-runs the transfer.
+    RemoteEditConflict,
     OverwriteTransfer {
         direction: SftpDirection,
         name: String,
@@ -785,6 +786,7 @@ pub fn read_local_dir(path: &std::path::Path) -> Vec<LocalEntry> {
 /// drained per tick by [`App::drain_sftp_browser`]. Held in `App::sftp_browser`
 /// (`None` when not browsing) because it owns a non-clonable [`SftpSession`].
 pub struct SftpBrowser {
+    pub editor: Option<crate::os::remote_edit::RemoteEdit>,
     pub host: usize,
     pub focus: SftpPane,
     pub local_cwd: std::path::PathBuf,
@@ -812,6 +814,64 @@ const MAX_ARMED_FAILURES: u32 = 2;
 /// without a live session.
 pub fn apply_sftp_event(b: &mut SftpBrowser, event: SftpEvent) {
     match event {
+        SftpEvent::Edited(result) => {
+            use crate::os::remote_edit::{EditOutcome, EditPhase};
+            match result {
+                Err(e) => {
+                    apply_sftp_event(
+                        b,
+                        SftpEvent::Failed {
+                            path: None,
+                            msg: e.msg,
+                            auth_failure: e.auth_failure,
+                            served: e.served,
+                        },
+                    );
+                    if let Some(edit) = b.editor.take() {
+                        if matches!(edit.phase, EditPhase::Downloading) {
+                            if let Err(e) = edit.paths.cleanup() {
+                                b.status.push_str(&format!(
+                                    "; cleanup failed: {e} ({})",
+                                    edit.paths.root.display()
+                                ));
+                            }
+                        } else {
+                            b.status =
+                                format!("Local copy: {}\n{}", edit.paths.local.display(), b.status);
+                        }
+                    }
+                }
+                Ok(outcome) => {
+                    b.session.note_op_succeeded();
+                    let Some(edit) = b.editor.as_mut() else {
+                        return;
+                    };
+                    match outcome {
+                        EditOutcome::Downloaded => {
+                            edit.phase = EditPhase::Ready;
+                        }
+                        EditOutcome::Conflict { snapshot } => {
+                            edit.phase = EditPhase::Conflict(snapshot);
+                        }
+                        EditOutcome::Unchanged | EditOutcome::Uploaded => {
+                            b.status = if matches!(outcome, EditOutcome::Unchanged) {
+                                "file unchanged — nothing uploaded"
+                            } else {
+                                "edited file uploaded"
+                            }
+                            .into();
+                            if let Err(e) = edit.paths.cleanup() {
+                                b.status.push_str(&format!(
+                                    "; cleanup failed: {e} ({})",
+                                    edit.paths.root.display()
+                                ));
+                            }
+                            b.editor = None;
+                        }
+                    }
+                }
+            }
+        }
         SftpEvent::Listing { path, cwd, entries } => {
             let is_initial = b.remote_cwd.is_empty() && path == ".";
             if is_initial {
@@ -2097,6 +2157,7 @@ mod tests {
 
     fn test_browser() -> SftpBrowser {
         SftpBrowser {
+            editor: None,
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/tmp"),
@@ -2326,6 +2387,7 @@ mod tests {
         use crate::os::askpass::ResolvedIdentity;
         use crate::os::sftp::{SftpArm, SftpEvent};
         let mut b = SftpBrowser {
+            editor: None,
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -2373,6 +2435,7 @@ mod tests {
         use crate::os::askpass::ResolvedIdentity;
         use crate::os::sftp::{SftpArm, SftpEvent};
         let mut b = SftpBrowser {
+            editor: None,
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -2429,6 +2492,7 @@ mod tests {
             passphrase: None,
         };
         let mut b = SftpBrowser {
+            editor: None,
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -2490,6 +2554,7 @@ mod tests {
         use crate::os::askpass::ResolvedIdentity;
         use crate::os::sftp::{SftpArm, SftpEvent};
         let mut b = SftpBrowser {
+            editor: None,
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
