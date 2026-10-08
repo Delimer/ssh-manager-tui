@@ -185,9 +185,7 @@ fn parse_ls_l_line(line: &str) -> Option<RemoteEntry> {
 // fast with a diagnosable error. On unix a per-session ControlMaster multiplexes
 // the ops over one authenticated connection so only the first pays the handshake.
 
-/// A remote operation to run against the session's host. Only directory listing
-/// is wired today; mutating ops (mkdir/rename/remove) are added when a UI consumer
-/// exists, to avoid carrying unreachable command-builders.
+/// A remote operation to run against the session's host.
 #[derive(Debug, Clone)]
 pub enum SftpOp {
     /// List a directory. [`list_batch`] builds this as `cd <path>` then a bare
@@ -199,6 +197,20 @@ pub enum SftpOp {
         local_commit: Option<(std::path::PathBuf, std::path::PathBuf)>,
     },
     Edit(super::remote_edit::EditOperation),
+    Manage {
+        script: String,
+        label: String,
+        local_dir_commit: Option<(std::path::PathBuf, std::path::PathBuf)>,
+        local_cleanup: Option<std::path::PathBuf>,
+        recovery: Option<String>,
+    },
+    RemoveTree {
+        path: String,
+    },
+    LocalDelete {
+        path: std::path::PathBuf,
+        is_dir: bool,
+    },
 }
 
 /// The result of a completed background op.
@@ -210,6 +222,11 @@ pub enum SftpEvent {
         served: bool,
     },
     Edited(Result<super::remote_edit::EditOutcome, SftpFailure>),
+    Managed {
+        label: String,
+        result: Result<(), SftpFailure>,
+        refresh_remote: bool,
+    },
     /// A `List` op completed: the listed `path`, its parsed entries, and (for the
     /// initial `"."` listing) the resolved absolute working directory from `pwd`.
     Listing {
@@ -345,18 +362,6 @@ impl SftpSession {
             #[cfg(unix)]
             None,
         )
-    }
-
-    /// The ControlMaster options to reuse this session's shared connection for an
-    /// out-of-band inline transfer (so a browse transfer authenticates at most
-    /// once). Empty on Windows / where there is no master — the transfer then
-    /// authenticates on its own.
-    pub fn control_args(&self) -> Vec<String> {
-        #[cfg(unix)]
-        if let Some(path) = &self.control {
-            return control_options(path);
-        }
-        Vec::new()
     }
 
     /// Arm this session: subsequent ops request a fresh per-op askpass listener
@@ -560,6 +565,78 @@ impl From<String> for SftpFailure {
 }
 
 fn run_op(alias: &str, common_args: &[String], arm: Option<SftpArm>, op: SftpOp) -> SftpEvent {
+    if let SftpOp::Manage {
+        script,
+        label,
+        local_dir_commit,
+        local_cleanup,
+        recovery,
+    } = op
+    {
+        let mut result = run_script(alias, common_args, arm, &script).map(|_| ());
+        if let Some((tmp, dst)) = local_dir_commit {
+            if result.is_ok() {
+                result = if std::fs::symlink_metadata(&dst).is_ok() {
+                    Err(SftpFailure::from(
+                        "destination appeared during copy".to_string(),
+                    ))
+                } else {
+                    std::fs::rename(&tmp, &dst).map_err(|e| {
+                        SftpFailure::from(format!("could not place downloaded directory: {e}"))
+                    })
+                };
+            }
+            if result.is_err() {
+                let _ = std::fs::remove_dir_all(&tmp);
+            }
+        }
+        if let Some(path) = local_cleanup {
+            let _ = std::fs::remove_file(path);
+        }
+        if let (Err(error), Some(path)) = (&mut result, recovery) {
+            error.msg.push_str(&format!("; check staged path: {path}"));
+        }
+        return SftpEvent::Managed {
+            label,
+            result,
+            refresh_remote: true,
+        };
+    }
+    if let SftpOp::LocalDelete { path, is_dir } = op {
+        let result = std::fs::symlink_metadata(&path)
+            .and_then(|metadata| {
+                if metadata.file_type().is_symlink() || !is_dir {
+                    std::fs::remove_file(&path)
+                } else {
+                    std::fs::remove_dir_all(&path)
+                }
+            })
+            .map_err(|e| SftpFailure::from(e.to_string()));
+        return SftpEvent::Managed {
+            label: format!("Deleted {}", path.display()),
+            result,
+            refresh_remote: false,
+        };
+    }
+    if let SftpOp::RemoveTree { path } = op {
+        let mut commands = String::new();
+        let mut remaining = 20_000;
+        let result = collect_remove_tree(
+            alias,
+            common_args,
+            arm.clone(),
+            &path,
+            0,
+            &mut remaining,
+            &mut commands,
+        )
+        .and_then(|_| run_script(alias, common_args, arm, &commands).map(|_| ()));
+        return SftpEvent::Managed {
+            label: format!("Deleted directory {path}"),
+            result,
+            refresh_remote: true,
+        };
+    }
     if let SftpOp::Transfer {
         script,
         local_commit,
@@ -572,7 +649,7 @@ fn run_op(alias: &str, common_args: &[String], arm: Option<SftpArm>, op: SftpOp)
         };
         if let Some((tmp, dst)) = local_commit {
             if result.is_ok() {
-                result = std::fs::rename(&tmp, &dst)
+                result = finalize_local_download(&tmp, &dst)
                     .map_err(|e| format!("download could not be placed: {e}"));
             }
             let _ = std::fs::remove_file(tmp);
@@ -615,6 +692,75 @@ fn run_op(alias: &str, common_args: &[String], arm: Option<SftpArm>, op: SftpOp)
             served: e.served,
         },
     }
+}
+
+/// Replace a staged download with an atomic same-directory rename.
+pub(crate) fn finalize_local_download(
+    tmp: &std::path::Path,
+    dst: &std::path::Path,
+) -> std::io::Result<()> {
+    std::fs::rename(tmp, dst)
+}
+
+/// List before deleting each level. Symlinks are removed as links, never traversed.
+/// Bound both depth and total entries so an unusual server cannot build an
+/// unbounded in-memory batch or loop through cyclic directory links.
+fn collect_remove_tree(
+    alias: &str,
+    common_args: &[String],
+    arm: Option<SftpArm>,
+    path: &str,
+    depth: usize,
+    remaining: &mut usize,
+    commands: &mut String,
+) -> Result<(), SftpFailure> {
+    if depth >= 128 || *remaining == 0 {
+        return Err(SftpFailure::from(
+            "directory tree exceeds deletion limit".to_string(),
+        ));
+    }
+    let quoted = super::remote_edit::literal_path(path)?;
+    let listing = run_script(
+        alias,
+        common_args,
+        arm.clone(),
+        &format!("cd {quoted}\nls -la\n"),
+    )?;
+    for entry in parse_ls_l(&listing) {
+        if !is_safe_local_name(&entry.name) || entry.name.contains('\\') {
+            return Err(SftpFailure::from(
+                "unsafe entry in remote directory".to_string(),
+            ));
+        }
+        *remaining -= 1;
+        if *remaining == 0 {
+            return Err(SftpFailure::from(
+                "directory tree exceeds deletion limit".to_string(),
+            ));
+        }
+        let child = remote_join(path, &entry.name);
+        let quoted_child = super::remote_edit::literal_path(&child)?;
+        if entry.is_dir && !entry.is_link {
+            collect_remove_tree(
+                alias,
+                common_args,
+                arm.clone(),
+                &child,
+                depth + 1,
+                remaining,
+                commands,
+            )?;
+        } else if entry.is_regular || entry.is_link {
+            commands.push_str(&format!("rm {quoted_child}\n"));
+        } else {
+            return Err(SftpFailure::from(format!(
+                "unsupported item in directory: {}",
+                entry.name
+            )));
+        }
+    }
+    commands.push_str(&format!("rmdir {quoted}\n"));
+    Ok(())
 }
 
 fn run_script(
@@ -1429,6 +1575,162 @@ srwxr-xr-x    1 user  group      0 Jan 15 10:30 sock";
             );
             assert!(!temp.exists());
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "set SSHM_TEST_SFTP_SERVER to a local OpenSSH sftp-server executable"]
+    fn large_browser_download_runs_on_worker_and_commits_file() {
+        let args = if let Ok(config) = std::env::var("SSHM_TEST_SFTP_CONFIG") {
+            vec!["-F".into(), config]
+        } else {
+            let server =
+                std::env::var("SSHM_TEST_SFTP_SERVER").expect("local SFTP server required");
+            vec!["-D".into(), server]
+        };
+        let root = std::env::temp_dir().join(format!("sshm-large-download-{}", nonce()));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("large.bin");
+        let stage = root.join("large.bin.sshm-part-test");
+        let destination = root.join("downloaded.bin");
+        let bytes = vec![0x5a; 16 * 1024 * 1024];
+        std::fs::write(&source, &bytes).unwrap();
+        let script = format!(
+            "get {} {}\n",
+            sftp_quote(source.to_str().unwrap()).unwrap(),
+            sftp_quote(stage.to_str().unwrap()).unwrap()
+        );
+        let SftpEvent::TransferFinished { result, .. } = run_op(
+            "sshm-test",
+            &args,
+            None,
+            SftpOp::Transfer {
+                script,
+                local_commit: Some((stage.clone(), destination.clone())),
+            },
+        ) else {
+            panic!("wrong event")
+        };
+        result.unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), bytes);
+        assert!(!stage.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "set SSHM_TEST_SFTP_SERVER to a local OpenSSH sftp-server executable"]
+    fn browser_directory_management_real_sftp() {
+        let args = if let Ok(config) = std::env::var("SSHM_TEST_SFTP_CONFIG") {
+            vec!["-F".into(), config]
+        } else {
+            let server =
+                std::env::var("SSHM_TEST_SFTP_SERVER").expect("local SFTP server required");
+            vec!["-D".into(), server]
+        };
+        let root = std::env::temp_dir().join(format!("sshm-manage-{}", nonce()));
+        std::fs::create_dir(&root).unwrap();
+        let root_s = root.to_str().unwrap();
+        let q = super::super::remote_edit::literal_path;
+        let remote = root.join("folder one");
+        let sub = remote.join("sub");
+        let renamed = root.join("renamed folder");
+        let empty = root.join("empty file.txt");
+        let source = root.join("source");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("nested/payload.txt"), "payload").unwrap();
+        let run = |script: String| {
+            let event = run_op(
+                "sshm-test",
+                &args,
+                None,
+                SftpOp::Manage {
+                    script,
+                    label: "managed".into(),
+                    local_dir_commit: None,
+                    local_cleanup: None,
+                    recovery: None,
+                },
+            );
+            let SftpEvent::Managed { result, .. } = event else {
+                panic!("wrong event")
+            };
+            result.unwrap();
+        };
+        run(format!(
+            "mkdir {}\nmkdir {}\n",
+            q(remote.to_str().unwrap()).unwrap(),
+            q(sub.to_str().unwrap()).unwrap()
+        ));
+        let zero = root.join("zero");
+        std::fs::write(&zero, []).unwrap();
+        run(format!(
+            "put {} {}\n",
+            q(zero.to_str().unwrap()).unwrap(),
+            q(empty.to_str().unwrap()).unwrap()
+        ));
+        assert_eq!(std::fs::metadata(&empty).unwrap().len(), 0);
+        run(format!(
+            "rename {} {}\n",
+            q(remote.to_str().unwrap()).unwrap(),
+            q(renamed.to_str().unwrap()).unwrap()
+        ));
+        let upload = renamed.join("uploaded");
+        run(format!(
+            "put -r {} {}\n",
+            q(source.to_str().unwrap()).unwrap(),
+            q(upload.to_str().unwrap()).unwrap()
+        ));
+        let temp = root.join("staged download");
+        let dest = root.join("downloaded");
+        let event = run_op(
+            "sshm-test",
+            &args,
+            None,
+            SftpOp::Manage {
+                script: format!(
+                    "get -r {} {}\n",
+                    q(upload.to_str().unwrap()).unwrap(),
+                    q(temp.to_str().unwrap()).unwrap()
+                ),
+                label: "copied".into(),
+                local_dir_commit: Some((temp.clone(), dest.clone())),
+                local_cleanup: None,
+                recovery: None,
+            },
+        );
+        let SftpEvent::Managed { result, .. } = event else {
+            panic!("wrong event")
+        };
+        result.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("nested/payload.txt")).unwrap(),
+            "payload"
+        );
+        #[cfg(unix)]
+        {
+            let outside = root.join("outside.txt");
+            std::fs::write(&outside, "keep").unwrap();
+            std::os::unix::fs::symlink(&outside, renamed.join("link")).unwrap();
+        }
+        let event = run_op(
+            "sshm-test",
+            &args,
+            None,
+            SftpOp::RemoveTree {
+                path: renamed.to_str().unwrap().into(),
+            },
+        );
+        let SftpEvent::Managed { result, .. } = event else {
+            panic!("wrong event")
+        };
+        result.unwrap();
+        assert!(!renamed.exists());
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::read_to_string(root.join("outside.txt")).unwrap(),
+            "keep"
+        );
+        assert!(root_s.contains("sshm-manage-"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

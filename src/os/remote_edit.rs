@@ -163,7 +163,7 @@ pub struct RemoteEdit {
 /// OpenSSH makeargv escapes globs inside quoted arguments. Double backslashes
 /// survive both tokenization and glob/undo_glob_escape; quotes stay literal.
 /// Always quote, even names without whitespace. Never permit a batch line break.
-fn literal_path(path: &str) -> Result<String, String> {
+pub(crate) fn literal_path(path: &str) -> Result<String, String> {
     if path.is_empty() || path.chars().any(char::is_control) {
         return Err("unsupported empty/control-character path".into());
     }
