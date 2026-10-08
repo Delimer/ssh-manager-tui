@@ -19,8 +19,9 @@ use crate::app::{
     App, ClassifiedKey, ConfirmAction, ConnectMode, EditForm, FormMode, GenOrigin, HostRef,
     KeyScanModal, KeyScanUi, ListFocus, PassphraseSyncForm, PasswordConfirmOrigin, PendingSave,
     PickOrigin, PinBlocked, RekeyMode, SFTP_FIELDS, Screen, SftpBrowser, SftpDirection, SftpForm,
-    SftpPane, VaultEntryForm, VaultRekey, VaultUnlock, form_from_view, form_idx,
-    override_form_from_host, override_idx, overrides_from_form, read_local_dir, view_from_form,
+    SftpNameAction, SftpNamePrompt, SftpPane, VaultEntryForm, VaultRekey, VaultUnlock,
+    form_from_view, form_idx, override_form_from_host, override_idx, overrides_from_form,
+    read_local_dir, view_from_form,
 };
 use crate::config::SshConfig;
 use crate::config::diff;
@@ -86,6 +87,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, terminal: &mut DefaultTerminal) 
         Screen::ConnectOverride { host } => handle_connect_override(app, key, host, terminal)?,
         Screen::SftpTransfer => handle_sftp_transfer(app, key, terminal)?,
         Screen::SftpBrowser => handle_sftp_browser(app, key, terminal)?,
+        Screen::SftpName => handle_sftp_name(app, key),
         Screen::Vault => handle_vault(app, key),
         Screen::VaultUnlock => handle_vault_unlock(app, key),
         Screen::VaultRekey => handle_vault_rekey(app, key),
@@ -3457,6 +3459,9 @@ fn open_sftp_browser(app: &mut App, host: usize) {
     app.sftp_browser = Some(SftpBrowser {
         selection: Default::default(),
         editor: None,
+        name_prompt: None,
+        manage_busy: false,
+        manage_status: None,
         host,
         focus: SftpPane::Remote,
         local_cwd,
@@ -3485,7 +3490,7 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
         return Ok(());
     }
     if let Some(b) = app.sftp_browser.as_ref()
-        && b.batch_busy()
+        && (b.batch_busy() || b.manage_busy)
         && !matches!(
             key.code,
             KeyCode::Tab | KeyCode::Char('j' | 'k' | '?') | KeyCode::Up | KeyCode::Down
@@ -3536,6 +3541,20 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
         KeyCode::Char('j') | KeyCode::Down => browser_move(app, 1),
         KeyCode::Char('k') | KeyCode::Up => browser_move(app, -1),
         KeyCode::F(4) | KeyCode::Char('e') => start_remote_edit(app),
+        KeyCode::Char('n') => start_sftp_name(app, SftpNameAction::CreateDir),
+        KeyCode::Char('N') => start_sftp_name(app, SftpNameAction::CreateFile),
+        KeyCode::Char('R') => {
+            if let Some((name, _)) = selected_browser_item(app) {
+                start_sftp_name(app, SftpNameAction::Rename { old: name });
+            }
+        }
+        KeyCode::Delete | KeyCode::Char('d') => {
+            if let Some((name, is_dir)) = selected_browser_item(app) {
+                let pane = app.sftp_browser.as_ref().unwrap().focus;
+                open_confirm(app, ConfirmAction::DeleteBrowserItem { pane, name, is_dir });
+            }
+        }
+        KeyCode::Char('C') => copy_browser_directory(app),
         KeyCode::Char('r') => browser_refresh(app),
         KeyCode::Backspace => browser_up(app),
         KeyCode::Enter => return browser_activate(app, terminal),
@@ -3568,6 +3587,370 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
         _ => {}
     }
     Ok(())
+}
+
+fn selected_browser_item(app: &App) -> Option<(String, bool)> {
+    let b = app.sftp_browser.as_ref()?;
+    match b.focus {
+        SftpPane::Local => {
+            let e = b.local_entries.get(b.local_sel)?;
+            (e.name != "..").then(|| (e.name.clone(), e.is_dir))
+        }
+        SftpPane::Remote => {
+            let e = b.remote_entries.get(b.remote_sel)?;
+            (e.name != ".."
+                && crate::os::sftp::is_safe_local_name(&e.name)
+                && !e.name.contains('\\'))
+            .then(|| (e.name.clone(), e.is_dir))
+        }
+    }
+}
+
+fn browser_mutation_ready(b: &SftpBrowser) -> bool {
+    !b.remote_cwd.is_empty()
+        && !b.remote_loading
+        && !b.manage_busy
+        && !b.batch_busy()
+        && !b.session.has_inflight()
+}
+
+fn start_sftp_name(app: &mut App, action: SftpNameAction) {
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return;
+    };
+    if !browser_mutation_ready(b) {
+        b.status = "wait for the current SFTP operation to finish".into();
+        return;
+    }
+    let value = match &action {
+        SftpNameAction::Rename { old } => old.clone(),
+        _ => String::new(),
+    };
+    b.name_prompt = Some(SftpNamePrompt {
+        pane: b.focus,
+        action,
+        cursor: value.len(),
+        value,
+    });
+    open_overlay(app, Screen::SftpName);
+}
+
+fn valid_browser_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.trim() == name
+        && name.len() <= 255
+        && crate::os::sftp::is_safe_local_name(name)
+        && !name
+            .chars()
+            .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
+}
+
+fn handle_sftp_name(app: &mut App, key: KeyEvent) {
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return;
+    };
+    let Some(prompt) = b.name_prompt.as_mut() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Esc => {
+            b.name_prompt = None;
+            close_overlay(app);
+        }
+        KeyCode::Enter => {
+            let prompt = prompt.clone();
+            if !valid_browser_name(&prompt.value) {
+                b.status = "name is empty or contains an unsupported character".into();
+                return;
+            }
+            b.name_prompt = None;
+            close_overlay(app);
+            apply_sftp_name(app, prompt);
+        }
+        KeyCode::Left => prompt.cursor = prev_boundary(&prompt.value, prompt.cursor),
+        KeyCode::Right => prompt.cursor = next_boundary(&prompt.value, prompt.cursor),
+        KeyCode::Home => prompt.cursor = 0,
+        KeyCode::End => prompt.cursor = prompt.value.len(),
+        KeyCode::Backspace => backspace(&mut prompt.value, &mut prompt.cursor),
+        KeyCode::Delete => delete_forward(&mut prompt.value, &mut prompt.cursor),
+        KeyCode::Char(c)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            insert_char(&mut prompt.value, &mut prompt.cursor, c);
+        }
+        _ => {}
+    }
+}
+
+fn apply_sftp_name(app: &mut App, prompt: SftpNamePrompt) {
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return;
+    };
+    if !browser_mutation_ready(b) || b.focus != prompt.pane {
+        b.status = "directory changed; retry the operation".into();
+        return;
+    }
+    let name = prompt.value;
+    let old = if let SftpNameAction::Rename { old } = &prompt.action {
+        if old == &name {
+            b.status = "name unchanged".into();
+            return;
+        }
+        Some(old.clone())
+    } else {
+        None
+    };
+    if b.focus == SftpPane::Local {
+        let path = b.local_cwd.join(&name);
+        let result = if path.symlink_metadata().is_ok() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "destination exists",
+            ))
+        } else {
+            match prompt.action {
+                SftpNameAction::CreateDir => std::fs::create_dir(&path),
+                SftpNameAction::CreateFile => std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .map(|_| ()),
+                SftpNameAction::Rename { old } => std::fs::rename(b.local_cwd.join(old), &path),
+            }
+        };
+        b.status = match result {
+            Ok(()) => format!("Created or renamed {name}"),
+            Err(e) => format!("Local operation failed: {e}"),
+        };
+        b.local_entries = read_local_dir(&b.local_cwd);
+        b.local_sel = b
+            .local_entries
+            .iter()
+            .position(|e| e.name == name)
+            .unwrap_or(b.local_sel.min(b.local_entries.len().saturating_sub(1)));
+        return;
+    }
+    if b.remote_entries.iter().any(|e| e.name == name) {
+        b.status = "destination already exists".into();
+        return;
+    }
+    let remote = remote_join(&b.remote_cwd, &name);
+    let quote = crate::os::remote_edit::literal_path;
+    let quoted = match quote(&remote) {
+        Ok(s) => s,
+        Err(e) => {
+            b.status = e;
+            return;
+        }
+    };
+    let mut cleanup = None;
+    let mut recovery = None;
+    let script = match prompt.action {
+        SftpNameAction::CreateDir => format!("mkdir {quoted}\n"),
+        SftpNameAction::CreateFile => {
+            let local =
+                std::env::temp_dir().join(format!("sshm-empty-{}", crate::os::sftp::nonce()));
+            if let Err(e) = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&local)
+            {
+                b.status = format!("Could not create local staging file: {e}");
+                return;
+            }
+            let temp = format!("{remote}.sshm-part-{}", crate::os::sftp::nonce());
+            let local_arg = match quote(&local.to_string_lossy()) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&local);
+                    b.status = e;
+                    return;
+                }
+            };
+            cleanup = Some(local);
+            recovery = Some(temp.clone());
+            format!(
+                "put {local_arg} {}\nrename {} {quoted}\n",
+                quote(&temp).unwrap(),
+                quote(&temp).unwrap()
+            )
+        }
+        SftpNameAction::Rename { old } => {
+            let source = remote_join(&b.remote_cwd, &old);
+            match quote(&source) {
+                Ok(from) => format!("rename {from} {quoted}\n"),
+                Err(e) => {
+                    b.status = e;
+                    return;
+                }
+            }
+        }
+    };
+    if let Some(old) = old
+        && !b.remote_entries.iter().any(|e| e.name == old)
+    {
+        b.status = "source disappeared; refresh and retry".into();
+        return;
+    }
+    b.manage_busy = true;
+    b.status = format!("Working on {name}…");
+    b.session.request(SftpOp::Manage {
+        script,
+        label: format!("Created or renamed {name}"),
+        local_dir_commit: None,
+        local_cleanup: cleanup,
+        recovery,
+    });
+}
+
+fn delete_browser_item(app: &mut App, pane: SftpPane, name: &str, is_dir: bool) {
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return;
+    };
+    if !browser_mutation_ready(b) || b.focus != pane {
+        b.status = "directory changed; retry deletion".into();
+        return;
+    }
+    let still_selected = match pane {
+        SftpPane::Local => b
+            .local_entries
+            .get(b.local_sel)
+            .is_some_and(|e| e.name == name && e.is_dir == is_dir),
+        SftpPane::Remote => b
+            .remote_entries
+            .get(b.remote_sel)
+            .is_some_and(|e| e.name == name && e.is_dir == is_dir),
+    };
+    if !still_selected || name == ".." {
+        b.status = "selection changed; retry deletion".into();
+        return;
+    }
+    b.manage_busy = true;
+    b.status = format!("Deleting {name}…");
+    match pane {
+        SftpPane::Local => b.session.request(SftpOp::LocalDelete {
+            path: b.local_cwd.join(name),
+            is_dir,
+        }),
+        SftpPane::Remote => {
+            let path = remote_join(&b.remote_cwd, name);
+            if is_dir {
+                b.session.request(SftpOp::RemoveTree { path });
+            } else {
+                match crate::os::remote_edit::literal_path(&path) {
+                    Ok(quoted) => b.session.request(SftpOp::Manage {
+                        script: format!("rm {quoted}\n"),
+                        label: format!("Deleted {name}"),
+                        local_dir_commit: None,
+                        local_cleanup: None,
+                        recovery: None,
+                    }),
+                    Err(e) => {
+                        b.manage_busy = false;
+                        b.status = e;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn copy_browser_directory(app: &mut App) {
+    let Some((name, is_dir)) = selected_browser_item(app) else {
+        return;
+    };
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return;
+    };
+    if !is_dir || name == ".." {
+        b.status = "select a directory to copy".into();
+        return;
+    }
+    if !valid_browser_name(&name) {
+        b.status = "directory name cannot be copied safely to the other pane".into();
+        return;
+    }
+    if !browser_mutation_ready(b) {
+        b.status = "wait for the current SFTP operation to finish".into();
+        return;
+    }
+    let local = b.local_cwd.join(&name);
+    let remote = remote_join(&b.remote_cwd, &name);
+    let temp_suffix = format!(".sshm-part-{}", crate::os::sftp::nonce());
+    let quote = crate::os::remote_edit::literal_path;
+    let (script, local_dir_commit, recovery) = match b.focus {
+        SftpPane::Local => {
+            if !b.local_cwd.join(&name).is_dir()
+                || std::fs::symlink_metadata(&local).is_ok_and(|m| m.file_type().is_symlink())
+            {
+                b.status = "source is not a real directory".into();
+                return;
+            }
+            if b.remote_entries.iter().any(|e| e.name == name) {
+                b.status = "remote destination exists; choose another name".into();
+                return;
+            }
+            let tmp = format!("{remote}{temp_suffix}");
+            let Ok(source) = quote(&local.to_string_lossy()) else {
+                b.status = "unsupported local path".into();
+                return;
+            };
+            let Ok(stage) = quote(&tmp) else {
+                b.status = "unsupported remote path".into();
+                return;
+            };
+            let Ok(dest) = quote(&remote) else {
+                b.status = "unsupported remote path".into();
+                return;
+            };
+            (
+                format!("put -r {source} {stage}\nrename {stage} {dest}\n"),
+                None,
+                Some(tmp),
+            )
+        }
+        SftpPane::Remote => {
+            if !b
+                .remote_entries
+                .iter()
+                .any(|e| e.name == name && e.is_dir && !e.is_link)
+            {
+                b.status = "source is not a real remote directory".into();
+                return;
+            }
+            if std::fs::symlink_metadata(&local).is_ok() {
+                b.status = "local destination exists; choose another name".into();
+                return;
+            }
+            let tmp = b.local_cwd.join(format!("{name}{temp_suffix}"));
+            let Ok(source) = quote(&remote) else {
+                b.status = "unsupported remote path".into();
+                return;
+            };
+            let Ok(stage) = quote(&tmp.to_string_lossy()) else {
+                b.status = "unsupported local path".into();
+                return;
+            };
+            (
+                format!("get -r {source} {stage}\n"),
+                Some((tmp, local)),
+                None,
+            )
+        }
+    };
+    b.manage_busy = true;
+    b.status = format!("Copying directory {name}…");
+    b.session.request(SftpOp::Manage {
+        script,
+        label: format!("Copied directory {name}"),
+        local_dir_commit,
+        local_cleanup: None,
+        recovery,
+    });
 }
 
 /// Select only regular local files and non-symlink remote files. Directory rows
@@ -5126,6 +5509,10 @@ fn handle_confirm(
                         save_remote_edit(app, Some(snapshot));
                     }
                 }
+                ConfirmAction::DeleteBrowserItem { pane, name, is_dir } => {
+                    close_overlay(app);
+                    delete_browser_item(app, pane, &name, is_dir);
+                }
                 ConfirmAction::DeployKey => {
                     close_overlay(app);
                     execute_deploy(app, terminal)?;
@@ -5208,6 +5595,7 @@ fn perform_confirm(app: &mut App, action: ConfirmAction) {
         // child); never reach here, but keep the match exhaustive without a panic path.
         ConfirmAction::OverwriteTransfer { .. }
         | ConfirmAction::RemoteEditConflict
+        | ConfirmAction::DeleteBrowserItem { .. }
         | ConfirmAction::DeployKey => {}
     }
 }
@@ -5910,6 +6298,9 @@ mod tests {
         let mut b = SftpBrowser {
             selection: Default::default(),
             editor: None,
+            name_prompt: None,
+            manage_busy: false,
+            manage_status: None,
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -5967,6 +6358,9 @@ mod tests {
         let mut b = SftpBrowser {
             selection: Default::default(),
             editor: None,
+            name_prompt: None,
+            manage_busy: false,
+            manage_status: None,
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -6168,6 +6562,9 @@ mod tests {
         SftpBrowser {
             selection: Default::default(),
             editor: None,
+            name_prompt: None,
+            manage_busy: false,
+            manage_status: None,
             host: 0,
             focus: SftpPane::Local,
             local_cwd,
@@ -6300,6 +6697,9 @@ mod tests {
         let mut b = SftpBrowser {
             selection: Default::default(),
             editor: None,
+            name_prompt: None,
+            manage_busy: false,
+            manage_status: None,
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),

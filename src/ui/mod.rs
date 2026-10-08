@@ -42,12 +42,12 @@ const LIST_FOOTER: &[(&str, &str)] = &[
 /// SFTP browser footer hints (must render within 80 columns).
 const SFTP_BROWSER_FOOTER: &[(&str, &str)] = &[
     ("Tab", "pane"),
-    ("Space", "mark"),
-    ("^A", "all"),
     ("Enter", "xfer"),
     ("F4", "edit"),
-    ("?", "help"),
-    ("Esc", "clear/back"),
+    ("n/N", "new"),
+    ("R", "rename"),
+    ("Del", "delete"),
+    ("C", "copy dir"),
 ];
 
 /// Key-manager footer hints (must render within 80 columns).
@@ -111,6 +111,7 @@ fn base_screen(app: &App) -> Screen {
         | Screen::VaultRekey
         | Screen::ConnectOverride { .. }
         | Screen::SftpTransfer
+        | Screen::SftpName
         | Screen::DiffPreview
         | Screen::PassphraseSync
         | Screen::PasswordConfirm { .. }
@@ -171,6 +172,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::ConnectOverride { host } => connect_override::draw(f, app, *host, body_a),
         Screen::DiffPreview => diff::draw(f, app, body_a),
         Screen::SftpTransfer => sftp::draw_transfer(f, app, body_a),
+        Screen::SftpName => sftp::draw_name_prompt(f, app, body_a),
         Screen::VaultUnlock => vault::draw_unlock(f, app, body_a),
         Screen::VaultRekey => vault::draw_rekey(f, app, body_a),
         Screen::VaultEntry { .. } => vault::draw_entry(f, app, body_a),

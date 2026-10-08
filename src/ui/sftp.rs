@@ -8,7 +8,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 
-use crate::app::{App, SftpBrowser, SftpPane};
+use crate::app::{App, SftpBrowser, SftpNameAction, SftpPane};
 
 use super::theme;
 use super::widgets::{
@@ -106,6 +106,41 @@ pub fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
     draw_local_pane(f, b, left);
     draw_remote_pane(f, b, right);
     draw_status(f, b, status_row);
+}
+
+pub fn draw_name_prompt(f: &mut Frame, app: &App, area: Rect) {
+    let Some(prompt) = app
+        .sftp_browser
+        .as_ref()
+        .and_then(|b| b.name_prompt.as_ref())
+    else {
+        return;
+    };
+    let action = match prompt.action {
+        SftpNameAction::CreateDir => "New directory",
+        SftpNameAction::CreateFile => "New file",
+        SftpNameAction::Rename { .. } => "Rename item",
+    };
+    let side = if prompt.pane == SftpPane::Local {
+        "local"
+    } else {
+        "remote"
+    };
+    let modal = centered_pct(65, 24, area);
+    f.render_widget(Clear, modal);
+    let lines = vec![
+        Line::from(format!("  {action} on {side}:")),
+        input_line(&prompt.value, prompt.cursor, true),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Enter confirm · Esc cancel",
+            Style::default().fg(theme::DIM),
+        )),
+    ];
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).block(modal_block(action, false)),
+        modal,
+    );
 }
 
 fn draw_local_pane(f: &mut Frame, b: &SftpBrowser, area: Rect) {

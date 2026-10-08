@@ -72,7 +72,11 @@ layout that stacks the panes on narrow terminals.
 - **SFTP** — without leaving the TUI: open an **interactive SFTP session** (`F`), run a
   **guided one-shot transfer**, or browse with a **dual-pane file browser** (`b`) that
   walks the remote and local trees side by side and transfers a file with `Enter`.
-  Transfers are **atomic** (an interruption never truncates an existing file) and
+  In the browser, `n` creates a directory, `N` an empty file, `R` renames the
+  selected item, and `Delete` removes it after confirmation (including nested
+  directories). `C` copies a selected directory and its contents to the other
+  pane; it refuses an existing destination. File transfers still use `Enter`.
+  Single-file transfers are **atomic** (an interruption never truncates an existing file) and
   **prompt before overwriting**. A stored vault password / key passphrase auto-fills the
   connection — gated on a trusted System32 OpenSSH client and your per-session consent.
 - **Lossless config editing** — add, edit, and delete `Host` blocks through a form:
