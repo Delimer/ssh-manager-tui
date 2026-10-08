@@ -3491,7 +3491,7 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
     }
     match key.code {
         KeyCode::Insert => {
-            browser_select(app, false);
+            browser_toggle_and_advance(app);
             return Ok(());
         }
         KeyCode::Char('*') => {
@@ -3983,9 +3983,9 @@ fn browser_copy_selected(app: &mut App, terminal: &mut DefaultTerminal) -> Resul
 
 /// Mark regular files and real directories. Never include `..` or symlinks;
 /// following a marked link during a recursive copy could leave the chosen tree.
-fn browser_select(app: &mut App, all: bool) {
+fn browser_select(app: &mut App, all: bool) -> bool {
     let Some(b) = app.sftp_browser.as_mut() else {
-        return;
+        return false;
     };
     let (names, selected): (Vec<String>, _) = match b.focus {
         SftpPane::Local => (
@@ -4019,10 +4019,20 @@ fn browser_select(app: &mut App, all: bool) {
             &mut b.selection.remote,
         ),
     };
+    let changed = !names.is_empty();
     for name in names {
         if all || !selected.remove(&name) {
             selected.insert(name);
         }
+    }
+    changed
+}
+
+/// Insert toggles the current item, then advances to the next row. Unsupported
+/// rows (parent, links, special files) keep the cursor in place.
+fn browser_toggle_and_advance(app: &mut App) {
+    if browser_select(app, false) {
+        browser_move(app, 1);
     }
 }
 
@@ -8440,6 +8450,37 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(app.sftp_browser.as_ref().unwrap().selection.remote.len(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn insert_toggles_item_and_advances_cursor() {
+        let root = std::env::temp_dir().join(format!(
+            "sshm-insert-selection-{}",
+            crate::os::sftp::nonce()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a"), "a").unwrap();
+        std::fs::write(root.join("b"), "b").unwrap();
+        let mut app = app_fixture("Host h\n  HostName localhost\n");
+        let mut b = h2_browser(root.clone(), Vec::new());
+        b.local_entries = read_local_dir(&root);
+        b.local_sel = b.local_entries.iter().position(|e| e.name == "a").unwrap();
+        app.sftp_browser = Some(b);
+
+        browser_toggle_and_advance(&mut app);
+        let b = app.sftp_browser.as_ref().unwrap();
+        assert!(b.selection.local.contains("a"));
+        assert_eq!(b.local_entries[b.local_sel].name, "b");
+
+        browser_toggle_and_advance(&mut app);
+        let b = app.sftp_browser.as_ref().unwrap();
+        assert!(b.selection.local.contains("b"));
+        assert_eq!(b.local_entries[b.local_sel].name, "b");
+
+        app.sftp_browser.as_mut().unwrap().local_sel = 0;
+        browser_toggle_and_advance(&mut app);
+        assert_eq!(app.sftp_browser.as_ref().unwrap().local_sel, 0);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -122,13 +122,13 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 "toggle item / select all files and folders",
             ));
             lines.push(key("Enter", "copy marked items, otherwise open / transfer"));
-            lines.push(key("F4 / e", "edit a remote file with VISUAL / EDITOR"));
-            lines.push(key("F5 / c", "copy marked items or cursor item"));
+            lines.push(key("e / F4", "edit a remote file with VISUAL / EDITOR"));
+            lines.push(key("c / F5", "copy marked items or cursor item"));
             lines.push(key("C", "copy selected directory with its subdirectories"));
-            lines.push(key("F6 / r", "rename selected item"));
-            lines.push(key("F7 / m", "create directory in focused pane"));
+            lines.push(key("r / F6", "rename selected item"));
+            lines.push(key("m / F7", "create directory in focused pane"));
             lines.push(key(
-                "F8 / Delete / d",
+                "d / F8 / Delete",
                 "delete selected item (confirm first)",
             ));
             lines.push(key("n", "create empty file in focused pane"));
@@ -159,7 +159,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             lines.push(key("Enter", "connect inline (same console)"));
             lines.push(key("t", "connect in new Windows Terminal tab"));
             lines.push(key("F", "open SFTP session (inline)"));
-            lines.push(key("b", "SFTP browser (dual-pane: local | remote)"));
+            lines.push(key("b", "SFTP browser (press ? there for its keys)"));
             lines.push(key("O", "connect with one-off overrides"));
             lines.push(key("o", "action menu (SFTP session / transfer, …)"));
             lines.push(key("c", "copy ssh command"));

@@ -217,7 +217,7 @@ remove, `Enter` commit, `Esc` revert the field.
 |-----|--------|
 | `Tab` | switch focus between the **local** and **remote** pane |
 | `j` / `k`, `↓` / `↑` | move the selection |
-| `Insert` / `*` | toggle a file or directory / select all files and directories in the focused pane |
+| `Insert` / `*` | toggle an item and move down / select all files and directories in the focused pane |
 | `Enter` | copy marked items; otherwise enter a directory or transfer the cursor file (prompts before overwriting) |
 | `Esc` | clear marked items on both panes; close when nothing is marked |
 | `F4` / `e` | edit the focused remote file with `$VISUAL`, then `$EDITOR` |
@@ -230,7 +230,7 @@ remove, `Enter` commit, `Esc` revert the field.
 | `F` | open a full interactive SFTP session to the host |
 | `Shift+R` | retry / refresh the focused pane · `?` help |
 
-Marked files and directories show `[x]` independently of the cursor; each pane shows its count.
+Marked files and directories show `*` and a filled row independently of the cursor; each pane shows its count.
 Batches run sequentially in the background. Navigation, selection changes and closing
 are locked during a batch; moving the cursor, switching panes and help remain available.
 Each existing destination prompts separately; declining counts as an error. Successful

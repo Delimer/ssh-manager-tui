@@ -155,12 +155,10 @@ fn draw_local_pane(f: &mut Frame, b: &SftpBrowser, area: Rect) {
     f.render_widget(block, area);
 
     render_entry_list(f, &b.local_entries, b.local_sel, focused, inner, |e| {
-        entry_line(
-            &e.name,
-            e.is_dir,
-            e.is_link,
-            None,
-            b.selection.local.contains(&e.name),
+        let marked = b.selection.local.contains(&e.name);
+        (
+            entry_line(&e.name, e.is_dir, e.is_link, None, marked),
+            marked,
         )
     });
 }
@@ -194,12 +192,10 @@ fn draw_remote_pane(f: &mut Frame, b: &SftpBrowser, area: Rect) {
         return;
     }
     render_entry_list(f, &b.remote_entries, b.remote_sel, focused, inner, |e| {
-        entry_line(
-            &e.name,
-            e.is_dir,
-            e.is_link,
-            Some(e.size),
-            b.selection.remote.contains(&e.name),
+        let marked = b.selection.remote.contains(&e.name);
+        (
+            entry_line(&e.name, e.is_dir, e.is_link, Some(e.size), marked),
+            marked,
         )
     });
 }
@@ -221,14 +217,10 @@ fn entry_line(
     };
     let mut spans = vec![
         Span::styled(
-            if selected {
-                "[x] "
-            } else if is_link || name == ".." {
-                "    "
-            } else {
-                "[ ] "
-            },
-            Style::default().fg(theme::ACCENT2),
+            if selected { "* " } else { "  " },
+            Style::default()
+                .fg(theme::ACCENT2)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("{glyph} "), Style::default().fg(color)),
         Span::styled(name.to_string(), Style::default().fg(color)),
@@ -261,7 +253,7 @@ fn render_entry_list<T>(
     sel: usize,
     focused: bool,
     area: Rect,
-    to_line: impl Fn(&T) -> Line<'static>,
+    to_line: impl Fn(&T) -> (Line<'static>, bool),
 ) {
     let height = area.height as usize;
     if height == 0 || entries.is_empty() {
@@ -274,7 +266,15 @@ fn render_entry_list<T>(
         .skip(scroll)
         .take(height)
         .map(|(i, e)| {
-            let mut line = to_line(e);
+            let (mut line, marked) = to_line(e);
+            if marked || (i == sel && focused) {
+                line.push_span(Span::raw(
+                    " ".repeat((area.width as usize).saturating_sub(line.width())),
+                ));
+            }
+            if marked {
+                line = line.style(theme::marked());
+            }
             if i == sel && focused {
                 line = line.style(theme::selection());
             }
@@ -403,14 +403,17 @@ mod tests {
         terminal
             .draw(|f| {
                 render_entry_list(f, &["marked", "cursor"], 1, true, f.area(), |name| {
-                    entry_line(name, false, false, None, *name == "marked")
+                    let marked = *name == "marked";
+                    (entry_line(name, false, false, None, marked), marked)
                 });
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(1, 0)].symbol(), "x");
-        assert_eq!(buffer[(1, 1)].symbol(), " ");
+        assert_eq!(buffer[(0, 0)].symbol(), "*");
+        assert_eq!(buffer[(0, 1)].symbol(), " ");
         assert_ne!(buffer[(0, 0)].bg, buffer[(0, 1)].bg);
+        assert_eq!(buffer[(34, 0)].bg, theme::MARK_BG);
+        assert_eq!(buffer[(34, 1)].bg, theme::SEL_BG);
     }
 
     #[test]
@@ -420,12 +423,14 @@ mod tests {
         terminal
             .draw(|f| {
                 render_entry_list(f, &["plain", "marked"], 0, false, f.area(), |name| {
-                    entry_line(name, true, false, None, *name == "marked")
+                    let marked = *name == "marked";
+                    (entry_line(name, true, false, None, marked), marked)
                 });
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(1, 0)].symbol(), " ");
-        assert_eq!(buffer[(1, 1)].symbol(), "x");
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
+        assert_eq!(buffer[(0, 1)].symbol(), "*");
+        assert_eq!(buffer[(23, 1)].bg, theme::MARK_BG);
     }
 }
