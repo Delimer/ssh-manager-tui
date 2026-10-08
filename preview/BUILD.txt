@@ -1,0 +1,10 @@
+Product: sshm SFTP Browser preview r3 (file and directory operations)
+Target: x86_64-pc-windows-gnu
+Build profile: release, stripped symbols, Cargo.lock enforced
+Compiler: rustc 1.99.0 (b940084d7 2026-09-28)
+Build date: 2026-10-08
+Source commit: b9d3ae3a39e1e4b2a0d1a3372c3c9d97e164fb8d
+Source tree: 954436694dc0faf9e19b819bc4db217cc915c377
+Source repository: https://github.com/Delimer/ssh-manager-tui
+Feature PR: https://github.com/Delimer/ssh-manager-tui/pull/3
+Windows runtime validation: pending
