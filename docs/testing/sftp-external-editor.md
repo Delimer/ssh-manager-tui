@@ -52,3 +52,11 @@ writer can race the final check; ownership, ACLs and xattrs are not guaranteed.
 Checked during implementation: Linux tests, local OpenSSH integration, real localhost
 sshd with agent/public IdentityFile, Windows-target compilation and Clippy.
 Windows runtime and interactive TUI acceptance remain unchecked.
+
+Windows permissions regression: test against a Unix SFTP server with a file at mode
+0640. Windows OpenSSH may print `-rw-******` for `ls -l /path/file`; the editor
+now uses `cd /path` followed by bare `ls -la` and matches the exact filename to
+read the server directory listing. F4 must open the file, and saving must keep
+0640 (including group/other bits). Test a dotfile and a name containing spaces.
+If even the directory listing hides permission bits, editing stops with the
+actual permission token in the error; unknown bits must never become zero.
