@@ -3554,7 +3554,8 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
                 open_confirm(app, ConfirmAction::DeleteBrowserItem { pane, name, is_dir });
             }
         }
-        KeyCode::F(5) | KeyCode::Char('C') => copy_browser_directory(app),
+        KeyCode::F(5) => return browser_copy_selected(app, terminal),
+        KeyCode::Char('C') => copy_browser_directory(app),
         KeyCode::Char('r') => browser_refresh(app),
         KeyCode::Backspace => browser_up(app),
         KeyCode::Enter => return browser_activate(app, terminal),
@@ -3951,6 +3952,41 @@ fn copy_browser_directory(app: &mut App) {
         local_cleanup: None,
         recovery,
     });
+}
+
+/// F5 follows the same source selection as Enter: marked files first, then the
+/// cursor item. A directory uses recursive background copy; a file reuses the
+/// existing overwrite prompt and single-file transfer path.
+fn browser_copy_selected(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
+    if start_browser_batch(app) {
+        advance_browser_batch(app);
+        return Ok(());
+    }
+    let Some(b) = app.sftp_browser.as_ref() else {
+        return Ok(());
+    };
+    if b.focus == SftpPane::Remote
+        && b.remote_entries
+            .get(b.remote_sel)
+            .is_some_and(|entry| entry.is_link || (!entry.is_dir && !entry.is_regular))
+    {
+        set_browser_status(app, "select a regular remote file or directory".into());
+        return Ok(());
+    }
+    let direction = if b.focus == SftpPane::Local {
+        SftpDirection::Put
+    } else {
+        SftpDirection::Get
+    };
+    let Some((name, is_dir)) = selected_browser_item(app) else {
+        return Ok(());
+    };
+    if is_dir {
+        copy_browser_directory(app);
+        Ok(())
+    } else {
+        browser_transfer(app, terminal, direction, &name)
+    }
 }
 
 /// Select only regular local files and non-symlink remote files. Directory rows
