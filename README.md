@@ -72,9 +72,9 @@ layout that stacks the panes on narrow terminals.
 - **SFTP** — without leaving the TUI: open an **interactive SFTP session** (`F`), run a
   **guided one-shot transfer**, or browse with a **dual-pane file browser** (`b`) that
   walks the remote and local trees side by side and transfers a file with `Enter`.
-  In the browser, `F7` creates a directory, `Shift+N` an empty file, `F6` renames the
+  In the browser, `F7` / `m` creates a directory, `n` an empty file, `F6` / `r` renames the
   selected item, and `F8` removes it after confirmation (including nested
-  directories). `F5` copies marked files, the cursor file or a directory and its
+  directories). `F5` / `c` copies marked files, the cursor file or a directory and its
   contents to the other pane; directory copies refuse an existing destination.
   File transfers also work with `Enter`.
   Single-file transfers are **atomic** (an interruption never truncates an existing file) and
@@ -217,18 +217,18 @@ remove, `Enter` commit, `Esc` revert the field.
 |-----|--------|
 | `Tab` | switch focus between the **local** and **remote** pane |
 | `j` / `k`, `↓` / `↑` | move the selection |
-| `Space` / `Ctrl+A` | toggle a file / select all files in the focused directory |
+| `Insert` / `*` | toggle a file / select all files in the focused directory |
 | `Enter` | transfer marked files; otherwise enter a directory or transfer the cursor file (prompts before overwriting) |
 | `Esc` | clear marked files on both panes; close when nothing is marked |
 | `F4` / `e` | edit the focused remote file with `$VISUAL`, then `$EDITOR` |
-| `F5` | copy marked files, the cursor file or a directory to the other pane |
-| `F6` | rename the selected file or directory |
-| `F7` | create a directory in the focused pane |
-| `F8` | delete the selected file or directory after confirmation |
-| `Shift+N` | create an empty file in the focused pane |
+| `F5` / `c` | copy marked files, the cursor file or a directory to the other pane |
+| `F6` / `r` | rename the selected file or directory |
+| `F7` / `m` | create a directory in the focused pane |
+| `F8` / `d` | delete the selected file or directory after confirmation |
+| `n` | create an empty file in the focused pane |
 | `Backspace` | go up a directory |
 | `F` | open a full interactive SFTP session to the host |
-| `r` | retry / refresh the remote listing · `?` help |
+| `Shift+R` | retry / refresh the focused pane · `?` help |
 
 Marked files show `[x]` independently of the cursor; each pane shows its count.
 Batches run sequentially in the background. Navigation, selection changes and closing

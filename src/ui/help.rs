@@ -117,23 +117,23 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             lines.push(section("SFTP browser (local | remote)"));
             lines.push(key("Tab", "switch focused pane"));
             lines.push(key("j / k, ↑ / ↓", "move selection"));
-            lines.push(key("Space / Ctrl-A", "toggle file / select all files"));
+            lines.push(key("Insert / *", "toggle file / select all files"));
             lines.push(key(
                 "Enter",
                 "transfer marked files, otherwise open / transfer",
             ));
             lines.push(key("F4 / e", "edit a remote file with VISUAL / EDITOR"));
-            lines.push(key("F5", "copy marked files, cursor file or directory"));
+            lines.push(key("F5 / c", "copy marked files, cursor file or directory"));
             lines.push(key("C", "copy selected directory with its subdirectories"));
-            lines.push(key("F6 / R", "rename selected item"));
-            lines.push(key("F7 / n", "create directory in focused pane"));
+            lines.push(key("F6 / r", "rename selected item"));
+            lines.push(key("F7 / m", "create directory in focused pane"));
             lines.push(key(
                 "F8 / Delete / d",
                 "delete selected item (confirm first)",
             ));
-            lines.push(key("Shift+N", "create empty file in focused pane"));
+            lines.push(key("n", "create empty file in focused pane"));
             lines.push(key("Backspace", "go up one directory"));
-            lines.push(key("r", "refresh the focused pane"));
+            lines.push(key("Shift+R", "refresh the focused pane"));
             lines.push(key(
                 "F",
                 "open an inline SFTP session (auto-fills password)",
