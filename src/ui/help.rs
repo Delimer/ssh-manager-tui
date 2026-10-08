@@ -118,6 +118,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             lines.push(key("Tab", "switch focused pane"));
             lines.push(key("j / k, ↑ / ↓", "move selection"));
             lines.push(key("Enter", "open a directory, or transfer the file"));
+            lines.push(key("F4 / e", "edit a remote file with VISUAL / EDITOR"));
             lines.push(key("Backspace", "go up one directory"));
             lines.push(key("r", "refresh the focused pane"));
             lines.push(key(

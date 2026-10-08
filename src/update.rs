@@ -3455,6 +3455,7 @@ fn open_sftp_browser(app: &mut App, host: usize) {
     }
     session.request(SftpOp::List(".".to_string()));
     app.sftp_browser = Some(SftpBrowser {
+        editor: None,
         host,
         focus: SftpPane::Remote,
         local_cwd,
@@ -3475,6 +3476,13 @@ fn open_sftp_browser(app: &mut App, host: usize) {
 /// local); Backspace goes up; `r` refreshes; `?` opens help; Esc closes (dropping
 /// the session, which tears down the ControlMaster).
 fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTerminal) -> Result<()> {
+    if app
+        .sftp_browser
+        .as_ref()
+        .is_some_and(|b| b.editor.is_some())
+    {
+        return Ok(());
+    }
     match key.code {
         KeyCode::Esc => {
             // Dropping the browser drops its SftpSession → ControlMaster teardown.
@@ -3493,6 +3501,7 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
         }
         KeyCode::Char('j') | KeyCode::Down => browser_move(app, 1),
         KeyCode::Char('k') | KeyCode::Up => browser_move(app, -1),
+        KeyCode::F(4) | KeyCode::Char('e') => start_remote_edit(app),
         KeyCode::Char('r') => browser_refresh(app),
         KeyCode::Backspace => browser_up(app),
         KeyCode::Enter => return browser_activate(app, terminal),
@@ -3525,6 +3534,109 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
         _ => {}
     }
     Ok(())
+}
+
+fn start_remote_edit(app: &mut App) {
+    use crate::os::remote_edit::{EditOperation, EditPaths, EditPhase, EditorCommand, RemoteEdit};
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return;
+    };
+    if b.focus != SftpPane::Remote
+        || b.remote_loading
+        || b.remote_cwd.is_empty()
+        || b.session.has_inflight()
+    {
+        b.status = "select a remote file after the listing finishes".into();
+        return;
+    }
+    let Some(entry) = b.remote_entries.get(b.remote_sel) else {
+        return;
+    };
+    if entry.is_dir || entry.is_link {
+        b.status = "only regular remote files can be edited".into();
+        return;
+    }
+    let command = match EditorCommand::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            b.status = e;
+            return;
+        }
+    };
+    let paths = match EditPaths::create(remote_join(&b.remote_cwd, &entry.name), &entry.name) {
+        Ok(p) => p,
+        Err(e) => {
+            b.status = e;
+            return;
+        }
+    };
+    b.session
+        .request(SftpOp::Edit(EditOperation::Download(paths.clone())));
+    b.status = "downloading file for editing…".into();
+    b.editor = Some(RemoteEdit {
+        paths,
+        command,
+        phase: EditPhase::Downloading,
+    });
+}
+
+/// Called on ticks after worker results are applied. The editor alone owns the
+/// terminal while running; network transfers and content comparison stay off UI.
+pub fn advance_remote_edit(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
+    use crate::os::remote_edit::EditPhase;
+    if !matches!(app.screen, Screen::SftpBrowser) {
+        return Ok(());
+    }
+    let Some(edit) = app.sftp_browser.as_ref().and_then(|b| b.editor.as_ref()) else {
+        return Ok(());
+    };
+    match &edit.phase {
+        EditPhase::Ready => {
+            let mut command = edit.command.command(&edit.paths.local);
+            suspend_tui(terminal)?;
+            let result = command.status();
+            restore_tui(terminal)?;
+            app.last_activity = Instant::now();
+            match result {
+                Ok(status) if status.success() => save_remote_edit(app, None),
+                result => {
+                    let message = match result {
+                        Ok(s) => format!("editor exited with {s}"),
+                        Err(e) => format!("could not start editor: {e}"),
+                    };
+                    keep_remote_edit(app, &message);
+                }
+            }
+        }
+        EditPhase::Conflict(_) => open_confirm(app, ConfirmAction::RemoteEditConflict),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn save_remote_edit(app: &mut App, expected: Option<std::path::PathBuf>) {
+    use crate::os::remote_edit::{EditOperation, EditPhase};
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return;
+    };
+    let Some(edit) = b.editor.as_mut() else {
+        return;
+    };
+    let expected = expected.unwrap_or_else(|| edit.paths.original.clone());
+    edit.phase = EditPhase::Saving;
+    b.status = "checking remote changes and saving…".into();
+    b.session.request(SftpOp::Edit(EditOperation::Save {
+        paths: edit.paths.clone(),
+        expected,
+    }));
+}
+
+fn keep_remote_edit(app: &mut App, message: &str) {
+    if let Some(b) = app.sftp_browser.as_mut()
+        && let Some(edit) = b.editor.take()
+    {
+        b.status = format!("Local copy: {}\n{message}", edit.paths.local.display());
+    }
 }
 
 /// Move the selection in the focused pane, clamped to its entry count.
@@ -4788,6 +4900,23 @@ fn handle_confirm(
                     close_overlay(app);
                     do_browser_transfer(app, terminal, direction, &name)?;
                 }
+                ConfirmAction::RemoteEditConflict => {
+                    close_overlay(app);
+                    let snapshot = app
+                        .sftp_browser
+                        .as_ref()
+                        .and_then(|b| b.editor.as_ref())
+                        .and_then(|edit| {
+                            if let crate::os::remote_edit::EditPhase::Conflict(path) = &edit.phase {
+                                Some(path.clone())
+                            } else {
+                                None
+                            }
+                        });
+                    if let Some(snapshot) = snapshot {
+                        save_remote_edit(app, Some(snapshot));
+                    }
+                }
                 ConfirmAction::DeployKey => {
                     close_overlay(app);
                     execute_deploy(app, terminal)?;
@@ -4799,6 +4928,9 @@ fn handle_confirm(
             // One confirmation arms exactly one deployment: a cancelled modal must
             // not leave a validated plan parked on App (#48).
             app.pending_deploy = None;
+            if matches!(action, ConfirmAction::RemoteEditConflict) {
+                keep_remote_edit(app, "remote overwrite cancelled");
+            }
             close_overlay(app);
         }
         _ => {}
@@ -4859,7 +4991,9 @@ fn perform_confirm(app: &mut App, action: ConfirmAction) {
         }
         // Intercepted in `handle_confirm` (they need the terminal to run an inline
         // child); never reach here, but keep the match exhaustive without a panic path.
-        ConfirmAction::OverwriteTransfer { .. } | ConfirmAction::DeployKey => {}
+        ConfirmAction::OverwriteTransfer { .. }
+        | ConfirmAction::RemoteEditConflict
+        | ConfirmAction::DeployKey => {}
     }
 }
 
@@ -5559,6 +5693,7 @@ mod tests {
         // Construct a browser in the armed + in-flight state, mirroring
         // apply_sftp_event_trips_circuit_breaker_on_auth_failure in app.rs.
         let mut b = SftpBrowser {
+            editor: None,
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -5613,6 +5748,7 @@ mod tests {
         // Mirror `armed_session_drops_navigation_while_op_in_flight` but call
         // `request_remote_listing` directly (the serialization guard is shared).
         let mut b = SftpBrowser {
+            editor: None,
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -5812,6 +5948,7 @@ mod tests {
     ) -> SftpBrowser {
         use crate::app::SftpPane;
         SftpBrowser {
+            editor: None,
             host: 0,
             focus: SftpPane::Local,
             local_cwd,
@@ -5938,6 +6075,7 @@ mod tests {
         // `if b.remote_loading { return; }`) would silently kill un-armed pipelining
         // and every armed-only test would still pass. (review: LOW)
         let mut b = SftpBrowser {
+            editor: None,
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
