@@ -3455,6 +3455,7 @@ fn open_sftp_browser(app: &mut App, host: usize) {
     }
     session.request(SftpOp::List(".".to_string()));
     app.sftp_browser = Some(SftpBrowser {
+        selection: Default::default(),
         host,
         focus: SftpPane::Remote,
         local_cwd,
@@ -3475,6 +3476,39 @@ fn open_sftp_browser(app: &mut App, host: usize) {
 /// local); Backspace goes up; `r` refreshes; `?` opens help; Esc closes (dropping
 /// the session, which tears down the ControlMaster).
 fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTerminal) -> Result<()> {
+    if let Some(b) = app.sftp_browser.as_ref()
+        && b.batch_busy()
+        && !matches!(
+            key.code,
+            KeyCode::Tab | KeyCode::Char('j' | 'k' | '?') | KeyCode::Up | KeyCode::Down
+        )
+    {
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Char(' ') => {
+            browser_select(app, false);
+            return Ok(());
+        }
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            browser_select(app, true);
+            return Ok(());
+        }
+        KeyCode::Esc => {
+            if let Some(b) = app.sftp_browser.as_mut()
+                && (!b.selection.local.is_empty() || !b.selection.remote.is_empty())
+            {
+                b.selection.local.clear();
+                b.selection.remote.clear();
+                return Ok(());
+            }
+        }
+        KeyCode::Enter if start_browser_batch(app) => {
+            advance_browser_batch(app);
+            return Ok(());
+        }
+        _ => {}
+    }
     match key.code {
         KeyCode::Esc => {
             // Dropping the browser drops its SftpSession → ControlMaster teardown.
@@ -3525,6 +3559,171 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
         _ => {}
     }
     Ok(())
+}
+
+/// Select only regular local files and non-symlink remote files. Directory rows
+/// are never batch candidates, including symlinks with unknown remote type.
+fn browser_select(app: &mut App, all: bool) {
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return;
+    };
+    let (names, selected): (Vec<String>, _) = match b.focus {
+        SftpPane::Local => (
+            b.local_entries
+                .iter()
+                .enumerate()
+                .filter(|(i, e)| {
+                    (all || *i == b.local_sel) && !e.is_dir && b.local_cwd.join(&e.name).is_file()
+                })
+                .map(|(_, e)| e.name.clone())
+                .collect(),
+            &mut b.selection.local,
+        ),
+        SftpPane::Remote => (
+            b.remote_entries
+                .iter()
+                .enumerate()
+                .filter(|(i, e)| {
+                    (all || *i == b.remote_sel)
+                        && e.is_regular
+                        && !e.is_dir
+                        && !e.is_link
+                        && e.name != ".."
+                })
+                .map(|(_, e)| e.name.clone())
+                .collect(),
+            &mut b.selection.remote,
+        ),
+    };
+    for name in names {
+        if all || !selected.remove(&name) {
+            selected.insert(name);
+        }
+    }
+}
+
+fn start_browser_batch(app: &mut App) -> bool {
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return false;
+    };
+    let (direction, selected) = match b.focus {
+        SftpPane::Local => (SftpDirection::Put, &b.selection.local),
+        SftpPane::Remote => (SftpDirection::Get, &b.selection.remote),
+    };
+    if selected.is_empty() {
+        return false;
+    }
+    if b.remote_loading || b.session.has_inflight() || b.remote_cwd.is_empty() {
+        b.status = "wait for the remote listing before transferring".into();
+        return true;
+    }
+    b.selection.batch = Some(crate::app::BrowserBatch {
+        direction,
+        remaining: selected.iter().cloned().collect(),
+        current: None,
+        succeeded: 0,
+        failures: Vec::new(),
+        finished: false,
+    });
+    true
+}
+
+/// Dispatch at most one file per tick. The previous event is applied (including
+/// the authentication circuit breaker) before another operation can start.
+pub fn advance_browser_batch(app: &mut App) {
+    if !matches!(app.screen, Screen::SftpBrowser) {
+        return;
+    }
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return;
+    };
+    let Some(batch) = b.selection.batch.as_mut() else {
+        return;
+    };
+    if batch.finished || batch.current.is_some() || b.session.has_inflight() {
+        return;
+    }
+    let Some(name) = batch.remaining.pop_front() else {
+        batch.finished = true;
+        b.status = format!(
+            "Batch: {} succeeded, {} errors",
+            batch.succeeded,
+            batch.failures.len()
+        );
+        if let Some((name, msg)) = batch.failures.last() {
+            b.status
+                .push_str(&format!(" · {name}: {msg} (failed files remain selected)"));
+        }
+        b.local_entries = read_local_dir(&b.local_cwd);
+        b.local_sel = b.local_sel.min(b.local_entries.len().saturating_sub(1));
+        b.remote_loading = true;
+        b.session.request(SftpOp::List(b.remote_cwd.clone()));
+        return;
+    };
+    let direction = batch.direction;
+    batch.current = Some(name.clone());
+    b.status = format!(
+        "Transferring {name} · {} succeeded, {} errors",
+        batch.succeeded,
+        batch.failures.len()
+    );
+    match transfer_gate(b, direction, &name) {
+        TransferGate::Refuse(msg) => b.finish_batch_file(Err(msg)),
+        TransferGate::Confirm => {
+            open_confirm(app, ConfirmAction::OverwriteTransfer { direction, name })
+        }
+        TransferGate::Proceed => dispatch_batch_file(app, direction, &name),
+    }
+}
+
+fn dispatch_batch_file(app: &mut App, direction: SftpDirection, name: &str) {
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return;
+    };
+    let regular_source = match direction {
+        SftpDirection::Put => b.local_cwd.join(name).is_file(),
+        SftpDirection::Get => b
+            .remote_entries
+            .iter()
+            .any(|e| e.name == name && e.is_regular),
+    };
+    let directory_destination = match direction {
+        SftpDirection::Get => b.local_cwd.join(name).is_dir(),
+        SftpDirection::Put => b
+            .remote_entries
+            .iter()
+            .any(|e| e.name == name && (e.is_dir || e.is_link)),
+    };
+    if !regular_source || directory_destination {
+        b.finish_batch_file(Err(
+            "source is no longer a file or destination is a directory/link".into(),
+        ));
+        return;
+    }
+    let (local, remote) = match transfer_endpoints(direction, &b.local_cwd, &b.remote_cwd, name) {
+        Ok(pair) => pair,
+        Err(msg) => {
+            b.finish_batch_file(Err(msg));
+            return;
+        }
+    };
+    let dst = if direction == SftpDirection::Get {
+        &local
+    } else {
+        &remote
+    };
+    let nonce = crate::os::sftp::nonce();
+    let tmp = format!("{dst}.sshm-part-{nonce}");
+    let bak = format!("{dst}.sshm-bak-{nonce}");
+    let Some(script) = transfer_script(direction, &local, &remote, &tmp, &bak) else {
+        b.finish_batch_file(Err("unsafe or unsupported filename".into()));
+        return;
+    };
+    let local_commit = (direction == SftpDirection::Get).then(|| (tmp.into(), local.into()));
+    b.session.request(SftpOp::Transfer {
+        script,
+        local_commit,
+    });
 }
 
 /// Move the selection in the focused pane, clamped to its entry count.
@@ -3597,6 +3796,8 @@ fn browser_up(app: &mut App) {
     match b.focus {
         SftpPane::Local => {
             if let Some(parent) = b.local_cwd.parent().map(|p| p.to_path_buf()) {
+                b.selection.local.clear();
+                b.selection.batch = None;
                 b.local_cwd = parent;
                 b.local_entries = read_local_dir(&b.local_cwd);
                 b.local_sel = 0;
@@ -3620,6 +3821,8 @@ fn navigate_remote(b: &mut SftpBrowser, path: String) {
     if b.session.is_armed() && b.remote_loading {
         return;
     }
+    b.selection.remote.clear();
+    b.selection.batch = None;
     b.remote_cwd = path.clone();
     b.remote_sel = 0;
     b.remote_entries.clear();
@@ -3678,6 +3881,8 @@ fn browser_activate(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()>
         }
         BrowseAct::LocalDescend(name) => {
             if let Some(b) = app.sftp_browser.as_mut() {
+                b.selection.local.clear();
+                b.selection.batch = None;
                 b.local_cwd = b.local_cwd.join(name);
                 b.local_entries = read_local_dir(&b.local_cwd);
                 b.local_sel = 0;
@@ -4786,7 +4991,11 @@ fn handle_confirm(
             match action {
                 ConfirmAction::OverwriteTransfer { direction, name } => {
                     close_overlay(app);
-                    do_browser_transfer(app, terminal, direction, &name)?;
+                    if app.sftp_browser.as_ref().is_some_and(|b| b.batch_busy()) {
+                        dispatch_batch_file(app, direction, &name);
+                    } else {
+                        do_browser_transfer(app, terminal, direction, &name)?;
+                    }
                 }
                 ConfirmAction::DeployKey => {
                     close_overlay(app);
@@ -4799,6 +5008,12 @@ fn handle_confirm(
             // One confirmation arms exactly one deployment: a cancelled modal must
             // not leave a validated plan parked on App (#48).
             app.pending_deploy = None;
+            if matches!(action, ConfirmAction::OverwriteTransfer { .. })
+                && let Some(b) = app.sftp_browser.as_mut()
+                && b.batch_busy()
+            {
+                b.finish_batch_file(Err("overwrite declined".into()));
+            }
             close_overlay(app);
         }
         _ => {}
@@ -5559,6 +5774,7 @@ mod tests {
         // Construct a browser in the armed + in-flight state, mirroring
         // apply_sftp_event_trips_circuit_breaker_on_auth_failure in app.rs.
         let mut b = SftpBrowser {
+            selection: Default::default(),
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -5583,6 +5799,7 @@ mod tests {
         });
         // Seed some entries to verify they are NOT cleared.
         b.remote_entries = vec![crate::os::sftp::RemoteEntry {
+            is_regular: true,
             name: "file.txt".to_string(),
             is_dir: false,
             is_link: false,
@@ -5613,6 +5830,7 @@ mod tests {
         // Mirror `armed_session_drops_navigation_while_op_in_flight` but call
         // `request_remote_listing` directly (the serialization guard is shared).
         let mut b = SftpBrowser {
+            selection: Default::default(),
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -5812,6 +6030,7 @@ mod tests {
     ) -> SftpBrowser {
         use crate::app::SftpPane;
         SftpBrowser {
+            selection: Default::default(),
             host: 0,
             focus: SftpPane::Local,
             local_cwd,
@@ -5834,12 +6053,14 @@ mod tests {
             std::env::temp_dir(),
             vec![
                 crate::os::sftp::RemoteEntry {
+                    is_regular: true,
                     name: "..".into(),
                     is_dir: true,
                     is_link: false,
                     size: 0,
                 },
                 crate::os::sftp::RemoteEntry {
+                    is_regular: true,
                     name: "report.txt".into(),
                     is_dir: false,
                     is_link: false,
@@ -5859,6 +6080,7 @@ mod tests {
         let fresh = h2_browser(
             std::env::temp_dir(),
             vec![crate::os::sftp::RemoteEntry {
+                is_regular: true,
                 name: "..".into(),
                 is_dir: true,
                 is_link: false,
@@ -5873,6 +6095,7 @@ mod tests {
         let dup = h2_browser(
             std::env::temp_dir(),
             vec![crate::os::sftp::RemoteEntry {
+                is_regular: true,
                 name: "dup.txt".into(),
                 is_dir: false,
                 is_link: false,
@@ -5938,6 +6161,7 @@ mod tests {
         // `if b.remote_loading { return; }`) would silently kill un-armed pipelining
         // and every armed-only test would still pass. (review: LOW)
         let mut b = SftpBrowser {
+            selection: Default::default(),
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -7576,5 +7800,118 @@ mod tests {
             plan.snippet
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn batch_selection_toggle_all_and_directory_scope() {
+        let root =
+            std::env::temp_dir().join(format!("sshm-selection-{}", crate::os::sftp::nonce()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join("folder")).unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::write(root.join(name), name).unwrap();
+        }
+        let mut app = app_fixture("Host h\n  HostName localhost\n");
+        let mut b = h2_browser(
+            root.clone(),
+            crate::os::sftp::parse_ls_l(
+                "-rw-r--r-- 1 u g 1 Jan 1 2026 a\ndrwxr-xr-x 1 u g 0 Jan 1 2026 dir\nlrwxrwxrwx 1 u g 1 Jan 1 2026 link -> dir\n",
+            ),
+        );
+        b.local_entries = read_local_dir(&root);
+        app.sftp_browser = Some(b);
+        browser_select(&mut app, true);
+        assert_eq!(app.sftp_browser.as_ref().unwrap().selection.local.len(), 3);
+        let b = app.sftp_browser.as_mut().unwrap();
+        b.local_sel = b.local_entries.iter().position(|e| e.name == "b").unwrap();
+        browser_select(&mut app, false);
+        assert!(
+            !app.sftp_browser
+                .as_ref()
+                .unwrap()
+                .selection
+                .local
+                .contains("b")
+        );
+        browser_select(&mut app, false);
+        assert_eq!(app.sftp_browser.as_ref().unwrap().selection.local.len(), 3);
+        app.sftp_browser.as_mut().unwrap().focus = SftpPane::Remote;
+        browser_select(&mut app, true);
+        assert_eq!(
+            app.sftp_browser
+                .as_ref()
+                .unwrap()
+                .selection
+                .remote
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        app.sftp_browser.as_mut().unwrap().focus = SftpPane::Local;
+        browser_up(&mut app);
+        assert!(
+            app.sftp_browser
+                .as_ref()
+                .unwrap()
+                .selection
+                .local
+                .is_empty()
+        );
+        assert_eq!(app.sftp_browser.as_ref().unwrap().selection.remote.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_results_keep_failures_selected_and_stop_on_auth_error() {
+        use crate::app::apply_sftp_event;
+        use crate::os::sftp::SftpEvent;
+        let mut app = app_fixture("Host h\n  HostName localhost\n");
+        let mut b = h2_browser(std::env::temp_dir(), Vec::new());
+        b.selection.local = ["a", "b", "c"].map(String::from).into();
+        app.sftp_browser = Some(b);
+        assert!(start_browser_batch(&mut app));
+        let b = app.sftp_browser.as_mut().unwrap();
+        for result in [Ok(()), Err("permission denied".into())] {
+            let batch = b.selection.batch.as_mut().unwrap();
+            batch.current = batch.remaining.pop_front();
+            apply_sftp_event(
+                b,
+                SftpEvent::TransferFinished {
+                    result,
+                    auth_failure: false,
+                    served: false,
+                },
+            );
+        }
+        assert!(!b.selection.local.contains("a"));
+        assert!(b.selection.local.contains("b"));
+        assert_eq!(b.selection.batch.as_ref().unwrap().remaining.len(), 1);
+        let batch = b.selection.batch.as_mut().unwrap();
+        batch.current = batch.remaining.pop_front();
+        batch.remaining.push_back("d".into());
+        apply_sftp_event(
+            b,
+            SftpEvent::TransferFinished {
+                result: Err("authentication failed".into()),
+                auth_failure: true,
+                served: false,
+            },
+        );
+        let batch = b.selection.batch.as_ref().unwrap();
+        assert_eq!(batch.succeeded, 1);
+        assert_eq!(batch.failures.len(), 3);
+        assert!(batch.remaining.is_empty());
+    }
+
+    #[test]
+    fn empty_selection_preserves_single_transfer_and_batch_waits_for_listing() {
+        let mut app = app_fixture("");
+        app.sftp_browser = Some(h2_browser(std::env::temp_dir(), Vec::new()));
+        assert!(!start_browser_batch(&mut app));
+        let b = app.sftp_browser.as_mut().unwrap();
+        b.selection.local.insert("file".into());
+        b.remote_loading = true;
+        assert!(start_browser_batch(&mut app));
+        assert!(app.sftp_browser.as_ref().unwrap().selection.batch.is_none());
     }
 }
