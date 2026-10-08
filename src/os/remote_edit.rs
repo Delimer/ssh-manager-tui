@@ -201,8 +201,7 @@ pub fn same_content(a: &Path, b: &Path) -> io::Result<bool> {
     }
 }
 
-/// Parse the mode from the exact-file `ls -l` response. Refuse links, directories,
-/// special files and unrecognized output instead of editing an ambiguous target.
+/// Parse a complete Unix mode, refusing unknown bits instead of resetting them.
 fn file_mode(output: &str) -> Result<u32, String> {
     let mode = output
         .lines()
@@ -213,13 +212,17 @@ fn file_mode(output: &str) -> Result<u32, String> {
         .ok_or("remote target is not a regular file or its permissions could not be read")?;
     let mut bits = 0;
     for (i, c) in mode[1..].iter().enumerate() {
-        let allowed = match i % 3 {
-            0 => b"r-".as_slice(),
-            1 => b"w-".as_slice(),
-            _ => b"x-sStT".as_slice(),
+        let allowed = match i {
+            0 | 3 | 6 => b"r-".as_slice(),
+            1 | 4 | 7 => b"w-".as_slice(),
+            2 | 5 => b"x-sS".as_slice(),
+            _ => b"x-tT".as_slice(),
         };
         if !allowed.contains(c) {
-            return Err("unrecognized remote permissions".into());
+            return Err(format!(
+                "OpenSSH did not expose full remote permissions ({})",
+                String::from_utf8_lossy(mode)
+            ));
         }
         if matches!(c, b'r' | b'w' | b'x' | b's' | b't') {
             bits |= 1 << (8 - i);
@@ -234,14 +237,44 @@ fn file_mode(output: &str) -> Result<u32, String> {
     Ok(bits)
 }
 
+/// Use the server's directory longname rather than client-formatted stat output.
+/// Windows OpenSSH formats an exact-file `ls -l file` as `-rw-******`,
+/// discarding group/other bits even when the remote server is Unix.
+fn directory_file_mode(output: &str, name: &str) -> Result<u32, String> {
+    let mut found = None;
+    for line in output.lines() {
+        let mut rest = line;
+        for _ in 0..8 {
+            rest = rest.trim_start();
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            rest = &rest[end..];
+        }
+        if rest.trim_start() != name {
+            continue;
+        }
+        if found.is_some() {
+            return Err("ambiguous remote directory entry".into());
+        }
+        found = Some(file_mode(line)?);
+    }
+    found.ok_or_else(|| "remote file not found in directory listing".into())
+}
+
 fn fetch(
     paths: &EditPaths,
     dest: &Path,
     run: &mut impl FnMut(&str) -> Result<String, SftpFailure>,
 ) -> Result<u32, SftpFailure> {
     let remote = literal_path(&paths.remote)?;
-    // Check type first; downloading a FIFO can block indefinitely.
-    let mode = file_mode(&run(&format!("ls -l {remote}\n"))?)?;
+    let (parent, name) = paths
+        .remote
+        .rsplit_once('/')
+        .unwrap_or((".", &paths.remote));
+    let parent = if parent.is_empty() { "/" } else { parent };
+    // A bare directory listing keeps names unprefixed and includes dotfiles.
+    // Check type before get: downloading a FIFO can block indefinitely.
+    let listing = run(&format!("cd {}\nls -la\n", literal_path(parent)?))?;
+    let mode = directory_file_mode(&listing, name)?;
     run(&format!("get {remote} {}\n", local_path(dest)?))?;
     Ok(mode)
 }
@@ -315,6 +348,88 @@ mod tests {
     }
 
     #[test]
+    fn directory_modes_match_exact_names_and_reject_unknown_or_ambiguous_entries() {
+        let listing = "sftp> ls -la\r\n-rw------- 1 u g 0 Jan 1 2026 other.txt\r\n-rw-r----- 1 u g 12 Jan 1 12:34 .пробел [x].txt\r\n";
+        assert_eq!(
+            directory_file_mode(listing, ".пробел [x].txt").unwrap(),
+            0o640
+        );
+        assert!(directory_file_mode(listing, "missing.txt").is_err());
+        for mode in [
+            "-rw-******",
+            "drwxr-xr-x",
+            "prw-r--r--",
+            "lrwxrwxrwx",
+            "-rwt------",
+            "-rw-----s-",
+        ] {
+            assert!(
+                directory_file_mode(&format!("{mode} 1 u g 0 Jan 1 2026 file.txt"), "file.txt")
+                    .is_err()
+            );
+        }
+        let line = "-rw-r----- 1 u g 0 Jan 1 2026 file.txt\n";
+        assert!(directory_file_mode(&line.repeat(2), "file.txt").is_err());
+    }
+
+    #[test]
+    fn windows_exact_stat_mask_does_not_break_download_or_reset_save_permissions() {
+        let p = paths();
+        let mut saved = false;
+        let mut transport = |script: &str| -> Result<String, SftpFailure> {
+            if script.starts_with("ls -l ") {
+                // Windows OpenSSH's local strmode discards group/other bits.
+                return Ok("-rw-****** 1 u g 6 Jan 1 2026 /remote/file.txt\r\n".into());
+            }
+            if script.starts_with("cd ") {
+                assert_eq!(script, "cd \"/remote\"\nls -la\n");
+                return Ok("-rw------- 1 u g 0 Jan 1 2026 unrelated.txt\r\n-rw-r----- 1 u g 6 Jan 1 2026 file.txt\r\n".into());
+            }
+            if script.starts_with("get ") {
+                fs::write(script.rsplit('"').nth(1).unwrap(), "before").unwrap();
+                return Ok(String::new());
+            }
+            assert!(script.starts_with("put "));
+            assert!(script.contains("\nchmod 640 "));
+            saved = true;
+            Ok(String::new())
+        };
+        assert!(matches!(
+            run_operation(EditOperation::Download(p.clone()), &mut transport).unwrap(),
+            EditOutcome::Downloaded
+        ));
+        fs::write(&p.local, "edited").unwrap();
+        assert!(matches!(
+            run_operation(
+                EditOperation::Save {
+                    paths: p.clone(),
+                    expected: p.original.clone()
+                },
+                &mut transport
+            )
+            .unwrap(),
+            EditOutcome::Uploaded
+        ));
+        assert!(saved);
+        p.cleanup().unwrap();
+    }
+
+    #[test]
+    fn masked_directory_permissions_stop_before_download() {
+        let p = paths();
+        let result = run_operation(EditOperation::Download(p.clone()), |script| {
+            assert!(
+                script.starts_with("cd "),
+                "unknown permissions must not reach get/put"
+            );
+            Ok("-rw-****** 1 u g 0 Jan 1 2026 file.txt\n".into())
+        });
+        assert!(result.unwrap_err().msg.contains("-rw-******"));
+        assert!(!p.local.exists());
+        p.cleanup().unwrap();
+    }
+
+    #[test]
     fn unchanged_content_never_contacts_server() {
         let p = paths();
         fs::write(&p.original, "same").unwrap();
@@ -352,7 +467,7 @@ mod tests {
         fs::write(&p.local, "edited").unwrap();
         let mut puts = 0;
         let mut transport = |script: &str| -> Result<String, SftpFailure> {
-            if script.starts_with("ls ") {
+            if script.starts_with("cd ") {
                 return Ok("-rw-r----- 1 u g 6 Jan 1 2026 file.txt\n".into());
             }
             if script.starts_with("get ") {

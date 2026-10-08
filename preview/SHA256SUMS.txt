@@ -1,1 +1,1 @@
-04494b97e27ccd782db1d5fe8d469ba07b35b39bb6b8c8bca2331ef5ee5c0cdf  sshm-sftp-mvp-win10-x64.zip
+969fd8cfe30c7751f9e3488a13e4d21c5b4d1224243de03929dd4faaaa986ecf  sshm-sftp-mvp-win10-x64-r2.zip
