@@ -784,7 +784,50 @@ pub fn read_local_dir(path: &std::path::Path) -> Vec<LocalEntry> {
 /// runs each remote op as a short-lived background `sftp -b` child; results are
 /// drained per tick by [`App::drain_sftp_browser`]. Held in `App::sftp_browser`
 /// (`None` when not browsing) because it owns a non-clonable [`SftpSession`].
+#[derive(Default)]
+pub struct BrowserSelection {
+    pub local: std::collections::BTreeSet<String>,
+    pub remote: std::collections::BTreeSet<String>,
+    pub batch: Option<BrowserBatch>,
+}
+
+pub struct BrowserBatch {
+    pub direction: SftpDirection,
+    pub remaining: std::collections::VecDeque<String>,
+    pub current: Option<String>,
+    pub succeeded: usize,
+    pub failures: Vec<(String, String)>,
+    pub finished: bool,
+}
+
+impl SftpBrowser {
+    pub fn batch_busy(&self) -> bool {
+        self.selection.batch.as_ref().is_some_and(|b| !b.finished)
+    }
+
+    pub fn finish_batch_file(&mut self, result: Result<(), String>) {
+        let Some(batch) = self.selection.batch.as_mut() else {
+            return;
+        };
+        let Some(name) = batch.current.take() else {
+            return;
+        };
+        match result {
+            Ok(()) => {
+                batch.succeeded += 1;
+                let selected = match batch.direction {
+                    SftpDirection::Get => &mut self.selection.remote,
+                    SftpDirection::Put => &mut self.selection.local,
+                };
+                selected.remove(&name);
+            }
+            Err(msg) => batch.failures.push((name, msg)),
+        }
+    }
+}
+
 pub struct SftpBrowser {
+    pub selection: BrowserSelection,
     pub host: usize,
     pub focus: SftpPane,
     pub local_cwd: std::path::PathBuf,
@@ -812,6 +855,36 @@ const MAX_ARMED_FAILURES: u32 = 2;
 /// without a live session.
 pub fn apply_sftp_event(b: &mut SftpBrowser, event: SftpEvent) {
     match event {
+        SftpEvent::TransferFinished {
+            result,
+            auth_failure,
+            served,
+        } => {
+            let was_armed = b.session.is_armed();
+            if let Err(msg) = &result {
+                apply_sftp_event(
+                    b,
+                    SftpEvent::Failed {
+                        path: None,
+                        msg: msg.clone(),
+                        auth_failure,
+                        served,
+                    },
+                );
+            } else {
+                b.session.note_op_succeeded();
+            }
+            b.finish_batch_file(result);
+            if (auth_failure || (was_armed && !b.session.is_armed()))
+                && let Some(batch) = b.selection.batch.as_mut()
+            {
+                for name in batch.remaining.drain(..) {
+                    batch
+                        .failures
+                        .push((name, "stopped after authentication failure".into()));
+                }
+            }
+        }
         SftpEvent::Listing { path, cwd, entries } => {
             let is_initial = b.remote_cwd.is_empty() && path == ".";
             if is_initial {
@@ -840,7 +913,9 @@ pub fn apply_sftp_event(b: &mut SftpBrowser, event: SftpEvent) {
             b.remote_entries = list;
             b.remote_sel = b.remote_sel.min(b.remote_entries.len().saturating_sub(1));
             b.remote_loading = false;
-            b.status.clear();
+            if b.selection.batch.is_none() {
+                b.status.clear();
+            }
             // A successful op resets the breaker's armed-failure streak.
             b.session.note_op_succeeded();
         }
@@ -2097,6 +2172,7 @@ mod tests {
 
     fn test_browser() -> SftpBrowser {
         SftpBrowser {
+            selection: Default::default(),
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/tmp"),
@@ -2115,6 +2191,7 @@ mod tests {
 
     fn rentry(name: &str, is_dir: bool) -> RemoteEntry {
         RemoteEntry {
+            is_regular: true,
             name: name.to_string(),
             is_dir,
             is_link: false,
@@ -2326,6 +2403,7 @@ mod tests {
         use crate::os::askpass::ResolvedIdentity;
         use crate::os::sftp::{SftpArm, SftpEvent};
         let mut b = SftpBrowser {
+            selection: Default::default(),
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -2373,6 +2451,7 @@ mod tests {
         use crate::os::askpass::ResolvedIdentity;
         use crate::os::sftp::{SftpArm, SftpEvent};
         let mut b = SftpBrowser {
+            selection: Default::default(),
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -2429,6 +2508,7 @@ mod tests {
             passphrase: None,
         };
         let mut b = SftpBrowser {
+            selection: Default::default(),
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),
@@ -2490,6 +2570,7 @@ mod tests {
         use crate::os::askpass::ResolvedIdentity;
         use crate::os::sftp::{SftpArm, SftpEvent};
         let mut b = SftpBrowser {
+            selection: Default::default(),
             host: 0,
             focus: SftpPane::Remote,
             local_cwd: std::path::PathBuf::from("/"),

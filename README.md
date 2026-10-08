@@ -212,10 +212,21 @@ remove, `Enter` commit, `Esc` revert the field.
 |-----|--------|
 | `Tab` | switch focus between the **local** and **remote** pane |
 | `j` / `k`, `↓` / `↑` | move the selection |
-| `Enter` | enter a directory, or **transfer** the selected file to the other pane (prompts before overwriting) |
+| `Space` / `Ctrl+A` | toggle a file / select all files in the focused directory |
+| `Enter` | transfer marked files; otherwise enter a directory or transfer the cursor file (prompts before overwriting) |
+| `Esc` | clear marked files on both panes; close when nothing is marked |
 | `Backspace` | go up a directory |
 | `F` | open a full interactive SFTP session to the host |
-| `r` | retry / refresh the remote listing · `?` help · `Esc` close |
+| `r` | retry / refresh the remote listing · `?` help |
+
+Marked files show `[x]` independently of the cursor; each pane shows its count.
+Batches run sequentially in the background. Navigation, selection changes and closing
+are locked during a batch; moving the cursor, switching panes and help remain available.
+Each existing destination prompts separately; declining counts as an error. Successful
+files are unmarked, failed/skipped files stay marked for retry. The final status shows
+success/error counts and the last error; move the cursor to a failed file to see its error. Authentication failures stop the batch safely.
+Selections are cleared when leaving their directory. Directories and remote symlinks
+are excluded. Existing filename restrictions (quotes, controls and source globs) apply.
 
 ### Key manager
 

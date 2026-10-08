@@ -117,14 +117,18 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             lines.push(section("SFTP browser (local | remote)"));
             lines.push(key("Tab", "switch focused pane"));
             lines.push(key("j / k, ↑ / ↓", "move selection"));
-            lines.push(key("Enter", "open a directory, or transfer the file"));
+            lines.push(key("Space / Ctrl-A", "toggle file / select all files"));
+            lines.push(key(
+                "Enter",
+                "transfer marked files, otherwise open / transfer",
+            ));
             lines.push(key("Backspace", "go up one directory"));
             lines.push(key("r", "refresh the focused pane"));
             lines.push(key(
                 "F",
                 "open an inline SFTP session (auto-fills password)",
             ));
-            lines.push(key("Esc", "close the browser"));
+            lines.push(key("Esc", "clear marked files, then close the browser"));
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "  Enter on a file downloads (remote pane) or uploads (local pane)",
