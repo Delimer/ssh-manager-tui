@@ -1,1 +1,1 @@
-b3d61cb9dfdef25d78f142066ac34ee2dce471bd652a03467ebd891d5e6181a6  sshm-sftp-browser-win10-x64-r5.zip
+9b9947e0e06003bf3041b7f5a8567afec8f4aeb4ab404bc56abe52d928740aa2  sshm-sftp-browser-win10-x64-r6.zip

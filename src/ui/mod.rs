@@ -47,7 +47,7 @@ const SFTP_BROWSER_FOOTER: &[(&str, &str)] = &[
     ("F6", "rename"),
     ("F7", "mkdir"),
     ("F8", "delete"),
-    ("N", "file"),
+    ("n", "file"),
 ];
 
 /// Key-manager footer hints (must render within 80 columns).

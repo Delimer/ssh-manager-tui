@@ -3479,7 +3479,7 @@ fn open_sftp_browser(app: &mut App, host: usize) {
 
 /// Route a keypress in the dual-pane browser. Tab switches panes; j/k move; Enter
 /// descends a directory or transfers a file (download from remote / upload from
-/// local); Backspace goes up; `r` refreshes; `?` opens help; Esc closes (dropping
+/// local); Backspace goes up; `R` refreshes; `?` opens help; Esc closes (dropping
 /// the session, which tears down the ControlMaster).
 fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTerminal) -> Result<()> {
     if app
@@ -3499,11 +3499,11 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
         return Ok(());
     }
     match key.code {
-        KeyCode::Char(' ') => {
+        KeyCode::Insert => {
             browser_select(app, false);
             return Ok(());
         }
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('*') => {
             browser_select(app, true);
             return Ok(());
         }
@@ -3541,9 +3541,9 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
         KeyCode::Char('j') | KeyCode::Down => browser_move(app, 1),
         KeyCode::Char('k') | KeyCode::Up => browser_move(app, -1),
         KeyCode::F(4) | KeyCode::Char('e') => start_remote_edit(app),
-        KeyCode::F(7) | KeyCode::Char('n') => start_sftp_name(app, SftpNameAction::CreateDir),
-        KeyCode::Char('N') => start_sftp_name(app, SftpNameAction::CreateFile),
-        KeyCode::F(6) | KeyCode::Char('R') => {
+        KeyCode::F(7) | KeyCode::Char('m') => start_sftp_name(app, SftpNameAction::CreateDir),
+        KeyCode::Char('n') | KeyCode::Char('N') => start_sftp_name(app, SftpNameAction::CreateFile),
+        KeyCode::F(6) | KeyCode::Char('r') => {
             if let Some((name, _)) = selected_browser_item(app) {
                 start_sftp_name(app, SftpNameAction::Rename { old: name });
             }
@@ -3554,9 +3554,9 @@ fn handle_sftp_browser(app: &mut App, key: KeyEvent, terminal: &mut DefaultTermi
                 open_confirm(app, ConfirmAction::DeleteBrowserItem { pane, name, is_dir });
             }
         }
-        KeyCode::F(5) => return browser_copy_selected(app, terminal),
+        KeyCode::F(5) | KeyCode::Char('c') => return browser_copy_selected(app, terminal),
         KeyCode::Char('C') => copy_browser_directory(app),
-        KeyCode::Char('r') => browser_refresh(app),
+        KeyCode::Char('R') => browser_refresh(app),
         KeyCode::Backspace => browser_up(app),
         KeyCode::Enter => return browser_activate(app, terminal),
         KeyCode::Char('F') => {
