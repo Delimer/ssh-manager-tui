@@ -364,18 +364,6 @@ impl SftpSession {
         )
     }
 
-    /// The ControlMaster options to reuse this session's shared connection for an
-    /// out-of-band inline transfer (so a browse transfer authenticates at most
-    /// once). Empty on Windows / where there is no master — the transfer then
-    /// authenticates on its own.
-    pub fn control_args(&self) -> Vec<String> {
-        #[cfg(unix)]
-        if let Some(path) = &self.control {
-            return control_options(path);
-        }
-        Vec::new()
-    }
-
     /// Arm this session: subsequent ops request a fresh per-op askpass listener
     /// and, when that listener is successfully started, run with `-o BatchMode=no`.
     /// If `arm_connect` fails for an individual op it degrades to `BatchMode=yes`
@@ -661,7 +649,7 @@ fn run_op(alias: &str, common_args: &[String], arm: Option<SftpArm>, op: SftpOp)
         };
         if let Some((tmp, dst)) = local_commit {
             if result.is_ok() {
-                result = std::fs::rename(&tmp, &dst)
+                result = finalize_local_download(&tmp, &dst)
                     .map_err(|e| format!("download could not be placed: {e}"));
             }
             let _ = std::fs::remove_file(tmp);
@@ -704,6 +692,14 @@ fn run_op(alias: &str, common_args: &[String], arm: Option<SftpArm>, op: SftpOp)
             served: e.served,
         },
     }
+}
+
+/// Replace a staged download with an atomic same-directory rename.
+pub(crate) fn finalize_local_download(
+    tmp: &std::path::Path,
+    dst: &std::path::Path,
+) -> std::io::Result<()> {
+    std::fs::rename(tmp, dst)
 }
 
 /// List before deleting each level. Symlinks are removed as links, never traversed.
@@ -1579,6 +1575,45 @@ srwxr-xr-x    1 user  group      0 Jan 15 10:30 sock";
             );
             assert!(!temp.exists());
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "set SSHM_TEST_SFTP_SERVER to a local OpenSSH sftp-server executable"]
+    fn large_browser_download_runs_on_worker_and_commits_file() {
+        let args = if let Ok(config) = std::env::var("SSHM_TEST_SFTP_CONFIG") {
+            vec!["-F".into(), config]
+        } else {
+            let server =
+                std::env::var("SSHM_TEST_SFTP_SERVER").expect("local SFTP server required");
+            vec!["-D".into(), server]
+        };
+        let root = std::env::temp_dir().join(format!("sshm-large-download-{}", nonce()));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("large.bin");
+        let stage = root.join("large.bin.sshm-part-test");
+        let destination = root.join("downloaded.bin");
+        let bytes = vec![0x5a; 16 * 1024 * 1024];
+        std::fs::write(&source, &bytes).unwrap();
+        let script = format!(
+            "get {} {}\n",
+            sftp_quote(source.to_str().unwrap()).unwrap(),
+            sftp_quote(stage.to_str().unwrap()).unwrap()
+        );
+        let SftpEvent::TransferFinished { result, .. } = run_op(
+            "sshm-test",
+            &args,
+            None,
+            SftpOp::Transfer {
+                script,
+                local_commit: Some((stage.clone(), destination.clone())),
+            },
+        ) else {
+            panic!("wrong event")
+        };
+        result.unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), bytes);
+        assert!(!stage.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

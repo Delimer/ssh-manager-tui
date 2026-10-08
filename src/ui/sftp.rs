@@ -158,7 +158,7 @@ fn draw_local_pane(f: &mut Frame, b: &SftpBrowser, area: Rect) {
         entry_line(
             &e.name,
             e.is_dir,
-            false,
+            e.is_link,
             None,
             b.selection.local.contains(&e.name),
         )
@@ -223,7 +223,7 @@ fn entry_line(
         Span::styled(
             if selected {
                 "[x] "
-            } else if is_dir || is_link {
+            } else if is_link || name == ".." {
                 "    "
             } else {
                 "[ ] "
@@ -314,7 +314,29 @@ fn draw_status(f: &mut Frame, b: &SftpBrowser, area: Rect) {
                     )
                 })
         });
-    let status = detail.as_deref().unwrap_or(&b.status);
+    let active_status = b.selection.batch.as_ref().and_then(|batch| {
+        let started = batch.started_at?;
+        batch.current.as_ref()?;
+        let mut status = format!("{} · {}s", b.status, started.elapsed().as_secs());
+        if let Some((path, total)) = &batch.download_progress {
+            let done = std::fs::metadata(path).map_or(0, |m| m.len());
+            if *total > 0 {
+                status.push_str(&format!(
+                    " · {} / {} ({}%)",
+                    human_size(done),
+                    human_size(*total),
+                    (done.saturating_mul(100) / *total).min(100)
+                ));
+            } else {
+                status.push_str(&format!(" · {}", human_size(done)));
+            }
+        }
+        Some(status)
+    });
+    let status = active_status
+        .as_deref()
+        .or(detail.as_deref())
+        .unwrap_or(&b.status);
     let line = if status.is_empty() {
         Line::from(Span::styled(
             "  Enter on a file transfers it to the other pane.",
@@ -389,5 +411,21 @@ mod tests {
         assert_eq!(buffer[(1, 0)].symbol(), "x");
         assert_eq!(buffer[(1, 1)].symbol(), " ");
         assert_ne!(buffer[(0, 0)].bg, buffer[(0, 1)].bg);
+    }
+
+    #[test]
+    fn directory_rows_show_mark_boxes() {
+        let backend = ratatui::backend::TestBackend::new(24, 2);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_entry_list(f, &["plain", "marked"], 0, false, f.area(), |name| {
+                    entry_line(name, true, false, None, *name == "marked")
+                });
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(1, 0)].symbol(), " ");
+        assert_eq!(buffer[(1, 1)].symbol(), "x");
     }
 }

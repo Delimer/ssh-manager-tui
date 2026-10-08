@@ -755,6 +755,7 @@ pub struct SftpNamePrompt {
 pub struct LocalEntry {
     pub name: String,
     pub is_dir: bool,
+    pub is_link: bool,
 }
 
 /// Read a local directory into sorted entries (directories first, then files,
@@ -783,6 +784,7 @@ pub fn read_local_dir(path: &std::path::Path) -> Vec<LocalEntry> {
             LocalEntry {
                 name: e.file_name().to_string_lossy().into_owned(),
                 is_dir,
+                is_link: ft.is_some_and(|t| t.is_symlink()),
             }
         })
         .collect();
@@ -797,6 +799,7 @@ pub fn read_local_dir(path: &std::path::Path) -> Vec<LocalEntry> {
             LocalEntry {
                 name: "..".to_string(),
                 is_dir: true,
+                is_link: false,
             },
         );
     }
@@ -818,6 +821,9 @@ pub struct BrowserBatch {
     pub direction: SftpDirection,
     pub remaining: std::collections::VecDeque<String>,
     pub current: Option<String>,
+    pub started_at: Option<std::time::Instant>,
+    pub download_progress: Option<(std::path::PathBuf, u64)>,
+    pub single: bool,
     pub succeeded: usize,
     pub failures: Vec<(String, String)>,
     pub finished: bool,
@@ -835,6 +841,8 @@ impl SftpBrowser {
         let Some(name) = batch.current.take() else {
             return;
         };
+        batch.started_at = None;
+        batch.download_progress = None;
         match result {
             Ok(()) => {
                 batch.succeeded += 1;
@@ -889,6 +897,8 @@ pub fn apply_sftp_event(b: &mut SftpBrowser, event: SftpEvent) {
         } => {
             b.manage_busy = false;
             let auth_failed = result.as_ref().is_err_and(|e| e.auth_failure);
+            let was_armed = b.session.is_armed();
+            let batch_result = result.as_ref().map(|_| ()).map_err(|e| e.msg.clone());
             match result {
                 Ok(()) => {
                     b.session.note_op_succeeded();
@@ -918,6 +928,16 @@ pub fn apply_sftp_event(b: &mut SftpBrowser, event: SftpEvent) {
                     .request(crate::os::sftp::SftpOp::List(b.remote_cwd.clone()));
             } else {
                 b.manage_status = None;
+            }
+            b.finish_batch_file(batch_result);
+            if (auth_failed || (was_armed && !b.session.is_armed()))
+                && let Some(batch) = b.selection.batch.as_mut()
+            {
+                for name in batch.remaining.drain(..) {
+                    batch
+                        .failures
+                        .push((name, "stopped after authentication failure".into()));
+                }
             }
         }
         SftpEvent::Edited(result) => {
@@ -1017,7 +1037,8 @@ pub fn apply_sftp_event(b: &mut SftpBrowser, event: SftpEvent) {
                         // Without the absolute home, navigation would build wrong
                         // paths from an empty cwd — refuse to apply and prompt retry.
                         b.remote_loading = false;
-                        b.status = "could not resolve remote home — press r to retry".to_string();
+                        b.status =
+                            "could not resolve remote home — press Shift+R to retry".to_string();
                         return;
                     }
                 }
@@ -1116,7 +1137,7 @@ pub fn apply_sftp_event(b: &mut SftpBrowser, event: SftpEvent) {
 pub(crate) fn sftp_loading_watchdog(b: &mut SftpBrowser) -> bool {
     if b.remote_loading && !b.session.has_inflight() {
         b.remote_loading = false;
-        b.status = "listing did not complete — press r to retry".to_string();
+        b.status = "listing did not complete — press Shift+R to retry".to_string();
         // Reseed the synthetic `..` row if the pane was cleared, so a user can still
         // navigate up (mirrors the failed-listing recovery in `apply_sftp_event`).
         if b.remote_entries.is_empty() {
