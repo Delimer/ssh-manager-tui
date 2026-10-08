@@ -6,6 +6,7 @@ Use disposable local and remote folders. In the browser, Tab chooses the pane.
 - [ ] Press Shift+N in each pane, enter a filename, and check a zero-byte file appears. An existing name must be refused.
 - [ ] Select a directory and press F6 in each pane; check the old name disappears and contents appear under the new name. Rename to an existing name must be refused.
 - [ ] Select a local directory with nested files, press F5, and check the full tree on the remote side. Repeat remote to local. An existing destination must be refused without changing it.
+- [ ] Select one file and press F5 on each pane; check it transfers to the other pane and asks before overwrite. Mark several regular files with Space and press F5; check that the sequential batch runs as with Enter.
 - [ ] Select a nonempty directory and press F8. Cancel the confirmation, then accept it; verify all nested contents are removed. Repeat on both panes. Check remote symlinks in the tree are removed as links without changing their targets.
 - [ ] Select a file and press F8; verify confirmation and removal on both panes.
 - [ ] While a long copy/delete runs, the UI still renders and does not start another mutating operation. A failed transfer reports the error; the source remains in place.

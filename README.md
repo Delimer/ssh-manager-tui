@@ -74,8 +74,9 @@ layout that stacks the panes on narrow terminals.
   walks the remote and local trees side by side and transfers a file with `Enter`.
   In the browser, `F7` creates a directory, `Shift+N` an empty file, `F6` renames the
   selected item, and `F8` removes it after confirmation (including nested
-  directories). `F5` copies a selected directory and its contents to the other
-  pane; it refuses an existing destination. File transfers still use `Enter`.
+  directories). `F5` copies marked files, the cursor file or a directory and its
+  contents to the other pane; directory copies refuse an existing destination.
+  File transfers also work with `Enter`.
   Single-file transfers are **atomic** (an interruption never truncates an existing file) and
   **prompt before overwriting**. A stored vault password / key passphrase auto-fills the
   connection — gated on a trusted System32 OpenSSH client and your per-session consent.
@@ -220,7 +221,7 @@ remove, `Enter` commit, `Esc` revert the field.
 | `Enter` | transfer marked files; otherwise enter a directory or transfer the cursor file (prompts before overwriting) |
 | `Esc` | clear marked files on both panes; close when nothing is marked |
 | `F4` / `e` | edit the focused remote file with `$VISUAL`, then `$EDITOR` |
-| `F5` | copy the selected directory and its contents to the other pane |
+| `F5` | copy marked files, the cursor file or a directory to the other pane |
 | `F6` | rename the selected file or directory |
 | `F7` | create a directory in the focused pane |
 | `F8` | delete the selected file or directory after confirmation |
