@@ -215,6 +215,7 @@ remove, `Enter` commit, `Esc` revert the field.
 | `Space` / `Ctrl+A` | toggle a file / select all files in the focused directory |
 | `Enter` | transfer marked files; otherwise enter a directory or transfer the cursor file (prompts before overwriting) |
 | `Esc` | clear marked files on both panes; close when nothing is marked |
+| `F4` / `e` | edit the focused remote file with `$VISUAL`, then `$EDITOR` |
 | `Backspace` | go up a directory |
 | `F` | open a full interactive SFTP session to the host |
 | `r` | retry / refresh the remote listing · `?` help |
@@ -227,6 +228,44 @@ files are unmarked, failed/skipped files stay marked for retry. The final status
 success/error counts and the last error; move the cursor to a failed file to see its error. Authentication failures stop the batch safely.
 Selections are cleared when leaving their directory. Directories and remote symlinks
 are excluded. Existing filename restrictions (quotes, controls and source globs) apply.
+
+### Editing remote files
+
+Set `VISUAL` or `EDITOR` to an executable and optional arguments. `VISUAL` takes
+priority; an empty value falls back to `EDITOR`. Quote executable paths containing
+spaces. sshm does not run a shell or expand variables in these commands.
+
+```sh
+export EDITOR='code --wait'       # or vim / nano
+```
+
+```powershell
+[Environment]::SetEnvironmentVariable('EDITOR', '"C:\Program Files\Notepad++\notepad++.exe" -multiInst -nosession', 'User')
+# Restart your terminal to pick up the new User environment variable.
+```
+
+Use a **blocking** editor: it must stay running until the file is saved and closed.
+For VS Code use `--wait`; for Notepad++ use `-multiInst -nosession`. An editor that
+hands the file to an existing process and exits immediately is unsupported.
+
+Focus a regular remote file and press `F4` or `e`. sshm downloads into a unique
+private temporary directory, suspends the TUI while the editor runs, and compares
+contents after it exits. Unchanged files are never uploaded. Before saving it
+re-downloads the remote file and compares bytes; a conflict asks for confirmation.
+Accepting rechecks the version shown in that confirmation. Declining, editor failure,
+or a transfer error keeps the local copy and displays its path in the browser status.
+After a successful upload (or an unchanged edit), the temporary directory is removed.
+
+Saving stages a remote sibling, copies the current POSIX permission bits, and uses
+the browser's backup-and-rename swap. A failed swap may leave `.sshm-part-*` and
+`.sshm-bak-*` recovery files; their paths appear in the error. This protects the
+original bytes, but is not a compare-and-swap transaction: another writer can still
+race the final check, and servers without atomic replacement have a brief rename
+window. Ownership, ACLs and extended attributes cannot be guaranteed by this SFTP
+workflow. Symlinks, directories and names containing control characters are refused.
+Spaces, quotes and Unicode in remote names are supported; temporary filenames use
+Windows-compatible spelling. Network operations run in the existing SFTP worker;
+SSH config, agent and authentication behavior are unchanged.
 
 ### Key manager
 

@@ -128,6 +128,11 @@ pub fn draw(f: &mut Frame, app: &App, action: ConfirmAction, area: Rect) {
         return;
     }
     let (title, message, danger) = match action {
+        ConfirmAction::RemoteEditConflict => (
+            "Remote file changed",
+            "The server file changed since download. Overwrite with your edits? No keeps the local copy.".to_string(),
+            true,
+        ),
         ConfirmAction::DeleteHost(_) => (
             "Delete host",
             "Remove this Host block from ~/.ssh/config?".to_string(),

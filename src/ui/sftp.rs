@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use crate::app::{App, SftpBrowser, SftpPane};
 
@@ -99,7 +99,7 @@ pub fn draw_browser(f: &mut Frame, app: &App, area: Rect) {
     };
 
     // Reserve one row at the bottom for the status/help bar.
-    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(4)]).split(area);
     let (panes, status_row) = (rows[0], rows[1]);
     let (left, right) = responsive_split(panes, 50, 50);
 
@@ -291,7 +291,7 @@ fn draw_status(f: &mut Frame, b: &SftpBrowser, area: Rect) {
             Style::default().fg(theme::WARN),
         ))
     };
-    f.render_widget(Paragraph::new(line), area);
+    f.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), area);
 }
 
 /// A compact human-readable byte size (e.g. `1.2K`, `3.4M`).

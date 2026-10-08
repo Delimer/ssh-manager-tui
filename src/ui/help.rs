@@ -122,6 +122,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 "Enter",
                 "transfer marked files, otherwise open / transfer",
             ));
+            lines.push(key("F4 / e", "edit a remote file with VISUAL / EDITOR"));
             lines.push(key("Backspace", "go up one directory"));
             lines.push(key("r", "refresh the focused pane"));
             lines.push(key(
