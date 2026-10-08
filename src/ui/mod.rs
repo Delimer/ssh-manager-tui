@@ -42,12 +42,13 @@ const LIST_FOOTER: &[(&str, &str)] = &[
 /// SFTP browser footer hints (must render within 80 columns).
 const SFTP_BROWSER_FOOTER: &[(&str, &str)] = &[
     ("Tab", "pane"),
-    ("F4", "edit"),
-    ("F5", "copy"),
-    ("F6", "rename"),
-    ("F7", "mkdir"),
-    ("F8", "delete"),
+    ("e", "edit"),
+    ("c", "copy"),
+    ("r", "rename"),
+    ("m", "mkdir"),
+    ("d", "delete"),
     ("n", "file"),
+    ("Ins", "mark"),
 ];
 
 /// Key-manager footer hints (must render within 80 columns).
