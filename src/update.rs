@@ -3364,15 +3364,6 @@ fn transfer_dest_exists(b: &SftpBrowser, direction: SftpDirection, name: &str) -
     }
 }
 
-/// Replace `dst` with the freshly-downloaded `tmp`. `std::fs::rename` replaces an
-/// existing destination atomically on BOTH unix (POSIX rename) and Windows (MoveFileExW
-/// with MOVEFILE_REPLACE_EXISTING), so the original is replaced only on success and left
-/// intact on any failure — NO pre-remove window that could lose the original if the
-/// rename then fails. `tmp` and `dst` are always siblings (same dir/volume).
-fn finalize_local_download(tmp: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::rename(tmp, dst)
-}
-
 /// A temp-file guard: removes the staged batch file on drop so it never lingers,
 /// even on an early return or a transfer that fails to launch.
 struct TempCleanup(std::path::PathBuf);
@@ -3864,78 +3855,78 @@ fn copy_browser_directory(app: &mut App) {
     let Some((name, is_dir)) = selected_browser_item(app) else {
         return;
     };
-    let Some(b) = app.sftp_browser.as_mut() else {
+    if !is_dir {
+        set_browser_status(app, "select a directory to copy".into());
         return;
+    }
+    let direction = match app.sftp_browser.as_ref().map(|b| b.focus) {
+        Some(SftpPane::Local) => SftpDirection::Put,
+        Some(SftpPane::Remote) => SftpDirection::Get,
+        None => return,
     };
-    if !is_dir || name == ".." {
-        b.status = "select a directory to copy".into();
-        return;
+    if let Err(msg) = copy_browser_directory_named(app, direction, &name, false) {
+        set_browser_status(app, msg);
     }
-    if !valid_browser_name(&name) {
-        b.status = "directory name cannot be copied safely to the other pane".into();
-        return;
+}
+
+fn copy_browser_directory_named(
+    app: &mut App,
+    direction: SftpDirection,
+    name: &str,
+    from_batch: bool,
+) -> std::result::Result<(), String> {
+    if !valid_browser_name(name) {
+        return Err("directory name cannot be copied safely to the other pane".into());
     }
-    if !browser_mutation_ready(b) {
-        b.status = "wait for the current SFTP operation to finish".into();
-        return;
+    let Some(b) = app.sftp_browser.as_mut() else {
+        return Err("browser is closed".into());
+    };
+    if b.remote_cwd.is_empty()
+        || b.remote_loading
+        || b.manage_busy
+        || b.session.has_inflight()
+        || (!from_batch && b.batch_busy())
+    {
+        return Err("wait for the current SFTP operation to finish".into());
     }
-    let local = b.local_cwd.join(&name);
-    let remote = remote_join(&b.remote_cwd, &name);
+    let local = b.local_cwd.join(name);
+    let remote = remote_join(&b.remote_cwd, name);
     let temp_suffix = format!(".sshm-part-{}", crate::os::sftp::nonce());
     let quote = crate::os::remote_edit::literal_path;
-    let (script, local_dir_commit, recovery) = match b.focus {
-        SftpPane::Local => {
-            if !b.local_cwd.join(&name).is_dir()
+    let (script, local_dir_commit, recovery) = match direction {
+        SftpDirection::Put => {
+            if !b.local_cwd.join(name).is_dir()
                 || std::fs::symlink_metadata(&local).is_ok_and(|m| m.file_type().is_symlink())
             {
-                b.status = "source is not a real directory".into();
-                return;
+                return Err("source is not a real directory".into());
             }
             if b.remote_entries.iter().any(|e| e.name == name) {
-                b.status = "remote destination exists; choose another name".into();
-                return;
+                return Err("remote destination exists; choose another name".into());
             }
             let tmp = format!("{remote}{temp_suffix}");
-            let Ok(source) = quote(&local.to_string_lossy()) else {
-                b.status = "unsupported local path".into();
-                return;
-            };
-            let Ok(stage) = quote(&tmp) else {
-                b.status = "unsupported remote path".into();
-                return;
-            };
-            let Ok(dest) = quote(&remote) else {
-                b.status = "unsupported remote path".into();
-                return;
-            };
+            let source = quote(&local.to_string_lossy())?;
+            let stage = quote(&tmp)?;
+            let dest = quote(&remote)?;
             (
                 format!("put -r {source} {stage}\nrename {stage} {dest}\n"),
                 None,
                 Some(tmp),
             )
         }
-        SftpPane::Remote => {
+        SftpDirection::Get => {
             if !b
                 .remote_entries
                 .iter()
                 .any(|e| e.name == name && e.is_dir && !e.is_link)
             {
-                b.status = "source is not a real remote directory".into();
-                return;
+                return Err("source is not a real remote directory".into());
             }
             if std::fs::symlink_metadata(&local).is_ok() {
-                b.status = "local destination exists; choose another name".into();
-                return;
+                return Err("local destination exists; choose another name".into());
             }
             let tmp = b.local_cwd.join(format!("{name}{temp_suffix}"));
-            let Ok(source) = quote(&remote) else {
-                b.status = "unsupported remote path".into();
-                return;
-            };
-            let Ok(stage) = quote(&tmp.to_string_lossy()) else {
-                b.status = "unsupported local path".into();
-                return;
-            };
+            let source = quote(&remote)?;
+            let stage = quote(&tmp.to_string_lossy())?;
             (
                 format!("get -r {source} {stage}\n"),
                 Some((tmp, local)),
@@ -3952,11 +3943,12 @@ fn copy_browser_directory(app: &mut App) {
         local_cleanup: None,
         recovery,
     });
+    Ok(())
 }
 
-/// F5 follows the same source selection as Enter: marked files first, then the
-/// cursor item. A directory uses recursive background copy; a file reuses the
-/// existing overwrite prompt and single-file transfer path.
+/// F5 follows the same source selection as Enter: marked items first, then the
+/// cursor item. Directories use recursive background copy; files reuse the
+/// overwrite prompt and background transfer path.
 fn browser_copy_selected(app: &mut App, terminal: &mut DefaultTerminal) -> Result<()> {
     if start_browser_batch(app) {
         advance_browser_batch(app);
@@ -3989,8 +3981,8 @@ fn browser_copy_selected(app: &mut App, terminal: &mut DefaultTerminal) -> Resul
     }
 }
 
-/// Select only regular local files and non-symlink remote files. Directory rows
-/// are never batch candidates, including symlinks with unknown remote type.
+/// Mark regular files and real directories. Never include `..` or symlinks;
+/// following a marked link during a recursive copy could leave the chosen tree.
 fn browser_select(app: &mut App, all: bool) {
     let Some(b) = app.sftp_browser.as_mut() else {
         return;
@@ -4001,7 +3993,12 @@ fn browser_select(app: &mut App, all: bool) {
                 .iter()
                 .enumerate()
                 .filter(|(i, e)| {
-                    (all || *i == b.local_sel) && !e.is_dir && b.local_cwd.join(&e.name).is_file()
+                    (all || *i == b.local_sel)
+                        && e.name != ".."
+                        && std::fs::symlink_metadata(b.local_cwd.join(&e.name)).is_ok_and(|m| {
+                            let kind = m.file_type();
+                            kind.is_file() || kind.is_dir()
+                        })
                 })
                 .map(|(_, e)| e.name.clone())
                 .collect(),
@@ -4013,8 +4010,7 @@ fn browser_select(app: &mut App, all: bool) {
                 .enumerate()
                 .filter(|(i, e)| {
                     (all || *i == b.remote_sel)
-                        && e.is_regular
-                        && !e.is_dir
+                        && (e.is_regular || e.is_dir)
                         && !e.is_link
                         && e.name != ".."
                 })
@@ -4049,6 +4045,9 @@ fn start_browser_batch(app: &mut App) -> bool {
         direction,
         remaining: selected.iter().cloned().collect(),
         current: None,
+        started_at: None,
+        download_progress: None,
+        single: false,
         succeeded: 0,
         failures: Vec::new(),
         finished: false,
@@ -4056,7 +4055,7 @@ fn start_browser_batch(app: &mut App) -> bool {
     true
 }
 
-/// Dispatch at most one file per tick. The previous event is applied (including
+/// Dispatch at most one item per tick. The previous event is applied (including
 /// the authentication circuit breaker) before another operation can start.
 pub fn advance_browser_batch(app: &mut App) {
     if !matches!(app.screen, Screen::SftpBrowser) {
@@ -4073,14 +4072,24 @@ pub fn advance_browser_batch(app: &mut App) {
     }
     let Some(name) = batch.remaining.pop_front() else {
         batch.finished = true;
-        b.status = format!(
-            "Batch: {} succeeded, {} errors",
-            batch.succeeded,
-            batch.failures.len()
-        );
+        b.status = if batch.single {
+            if batch.failures.is_empty() {
+                "File copied".into()
+            } else {
+                "File copy failed".into()
+            }
+        } else {
+            format!(
+                "Batch: {} succeeded, {} errors",
+                batch.succeeded,
+                batch.failures.len()
+            )
+        };
         if let Some((name, msg)) = batch.failures.last() {
-            b.status
-                .push_str(&format!(" · {name}: {msg} (failed files remain selected)"));
+            b.status.push_str(&format!(" · {name}: {msg}"));
+            if !batch.single {
+                b.status.push_str(" (failed items remain selected)");
+            }
         }
         b.local_entries = read_local_dir(&b.local_cwd);
         b.local_sel = b.local_sel.min(b.local_entries.len().saturating_sub(1));
@@ -4090,11 +4099,24 @@ pub fn advance_browser_batch(app: &mut App) {
     };
     let direction = batch.direction;
     batch.current = Some(name.clone());
+    batch.started_at = Some(Instant::now());
     b.status = format!(
         "Transferring {name} · {} succeeded, {} errors",
         batch.succeeded,
         batch.failures.len()
     );
+    let is_dir = match direction {
+        SftpDirection::Put => b.local_entries.iter().any(|e| e.name == name && e.is_dir),
+        SftpDirection::Get => b.remote_entries.iter().any(|e| e.name == name && e.is_dir),
+    };
+    if is_dir {
+        if let Err(msg) = copy_browser_directory_named(app, direction, &name, true)
+            && let Some(b) = app.sftp_browser.as_mut()
+        {
+            b.finish_batch_file(Err(msg));
+        }
+        return;
+    }
     match transfer_gate(b, direction, &name) {
         TransferGate::Refuse(msg) => b.finish_batch_file(Err(msg)),
         TransferGate::Confirm => {
@@ -4147,6 +4169,16 @@ fn dispatch_batch_file(app: &mut App, direction: SftpDirection, name: &str) {
         b.finish_batch_file(Err("unsafe or unsupported filename".into()));
         return;
     };
+    if direction == SftpDirection::Get
+        && let Some(batch) = b.selection.batch.as_mut()
+    {
+        let total = b
+            .remote_entries
+            .iter()
+            .find(|e| e.name == name)
+            .map_or(0, |e| e.size);
+        batch.download_progress = Some((std::path::PathBuf::from(&tmp), total));
+    }
     let local_commit = (direction == SftpDirection::Get).then(|| (tmp.into(), local.into()));
     b.session.request(SftpOp::Transfer {
         script,
@@ -4456,8 +4488,8 @@ fn transfer_gate(b: &SftpBrowser, direction: SftpDirection, name: &str) -> Trans
     // loading that listing is stale/empty, so an existing destination could be missed
     // and the overwrite confirm bypassed. Refuse until the listing settles. (A download
     // is unaffected — its existence check is the authoritative local filesystem.)
-    if direction == SftpDirection::Put && b.remote_loading {
-        return TransferGate::Refuse("remote still loading — wait for the listing".to_string());
+    if b.remote_loading || b.session.has_inflight() || b.manage_busy {
+        return TransferGate::Refuse("wait for the current SFTP operation".to_string());
     }
     if let Err(msg) = transfer_endpoints(direction, &b.local_cwd, &b.remote_cwd, name) {
         return TransferGate::Refuse(msg);
@@ -4500,109 +4532,36 @@ fn browser_transfer(
     }
 }
 
-/// Run the actual `sftp -b` transfer of `name` between the panes, ATOMICALLY (M2):
-/// write to a temp on the destination side then put it in place, so an interrupted
-/// transfer never truncates an existing file. Runs inline (suspend/restore so sftp's
-/// progress meter shows), then refreshes the destination pane. Invoked directly when
-/// the destination is new, or from the overwrite-confirm on `y`.
+/// Queue one cursor file on the browser worker. The same atomic transfer recipe
+/// handles marked and unmarked files; the TUI keeps drawing while SFTP runs.
 fn do_browser_transfer(
     app: &mut App,
-    terminal: &mut DefaultTerminal,
+    _terminal: &mut DefaultTerminal,
     direction: SftpDirection,
     name: &str,
 ) -> Result<()> {
-    let Some(b) = app.sftp_browser.as_ref() else {
+    let Some(b) = app.sftp_browser.as_mut() else {
         return Ok(());
     };
-    if b.remote_cwd.is_empty() {
-        return Ok(());
+    if b.selection
+        .batch
+        .as_ref()
+        .is_none_or(|batch| batch.finished)
+    {
+        b.selection.batch = Some(crate::app::BrowserBatch {
+            direction,
+            remaining: Default::default(),
+            current: Some(name.to_string()),
+            started_at: Some(Instant::now()),
+            download_progress: None,
+            single: true,
+            succeeded: 0,
+            failures: Vec::new(),
+            finished: false,
+        });
     }
-    let Some(host) = app.hosts.get(b.host).cloned() else {
-        return Ok(());
-    };
-    let alias = host.alias().to_string();
-    let (local, remote) = match transfer_endpoints(direction, &b.local_cwd, &b.remote_cwd, name) {
-        Ok(pair) => pair,
-        Err(msg) => {
-            set_browser_status(app, msg);
-            return Ok(());
-        }
-    };
-    // Destination-side temp + backup siblings (same dir/volume), each with an
-    // unguessable nonce so a pre-planted file/symlink can't redirect the write. The
-    // backup (upload only) holds the original through the in-batch swap window.
-    let dst = match direction {
-        SftpDirection::Get => &local,
-        SftpDirection::Put => &remote,
-    };
-    let nonce = crate::os::sftp::nonce();
-    let dst_tmp = format!("{dst}.sshm-part-{nonce}");
-    let dst_bak = format!("{dst}.sshm-bak-{nonce}");
-    let Some(batch) = transfer_script(direction, &local, &remote, &dst_tmp, &dst_bak) else {
-        set_browser_status(
-            app,
-            "name contains a quote, control, or glob (* ? [) character — cannot transfer"
-                .to_string(),
-        );
-        return Ok(());
-    };
-    let temp = match stage_batch(&batch) {
-        Ok(p) => p,
-        Err(e) => {
-            set_browser_status(app, format!("could not stage transfer: {e}"));
-            return Ok(());
-        }
-    };
-    let _cleanup = TempCleanup(temp.clone());
-    // Reuse the browse session's ControlMaster (unix) so this transfer rides the
-    // already-authenticated connection instead of handshaking from scratch.
-    let mut args = b
-        .session
-        .control_args()
-        .into_iter()
-        .chain(["-b".to_string(), temp.display().to_string()])
-        .collect::<Vec<_>>();
-    args.extend(Protocol::Sftp.build_args(&host, &ConnectOverrides::default()));
-
-    let ok = execute_sftp_transfer(app, terminal, &host, &alias, &args)?;
-
-    // M2 finalize. A download landed in a LOCAL temp: on success rename it over the
-    // destination, on failure drop the partial so the original is left untouched. An
-    // upload's swap (put -> rename-original-aside -> rename-temp-in -> rm-backup) runs
-    // entirely in-batch server-side, so nothing to do here — a failed upload may leave a
-    // remote `.sshm-part`/`.sshm-bak`, but the ORIGINAL is never destroyed (it survives
-    // at the backup through the swap window).
-    if direction == SftpDirection::Get {
-        let tmp_path = std::path::PathBuf::from(&dst_tmp);
-        let dst_path = std::path::PathBuf::from(&local);
-        if ok {
-            if let Err(e) = finalize_local_download(&tmp_path, &dst_path) {
-                // rename failed atomically (e.g. dst is a directory, or locked): the
-                // original is untouched. Drop the staged temp so it never litters the
-                // pane, and tell the user the download did not land.
-                let _ = std::fs::remove_file(&tmp_path);
-                set_browser_status(app, format!("download could not be placed: {e}"));
-            }
-        } else {
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-    }
-
-    // Refresh the side that just received the file.
-    match direction {
-        SftpDirection::Get => {
-            if let Some(b) = app.sftp_browser.as_mut() {
-                b.local_entries = read_local_dir(&b.local_cwd);
-                b.local_sel = b.local_sel.min(b.local_entries.len().saturating_sub(1));
-            }
-        }
-        SftpDirection::Put => {
-            if let Some(b) = app.sftp_browser.as_mut() {
-                let path = current_remote_path(b);
-                request_remote_listing(b, path);
-            }
-        }
-    }
+    b.status = format!("Copying file {name}…");
+    dispatch_batch_file(app, direction, name);
     Ok(())
 }
 
@@ -6584,7 +6543,7 @@ mod tests {
         let tmp = dir.join("file.txt.sshm-part-x");
         std::fs::write(&dst, b"OLD").unwrap();
         std::fs::write(&tmp, b"NEW").unwrap();
-        finalize_local_download(&tmp, &dst).unwrap();
+        crate::os::sftp::finalize_local_download(&tmp, &dst).unwrap();
         assert_eq!(std::fs::read(&dst).unwrap(), b"NEW", "destination replaced");
         assert!(!tmp.exists(), "the temp is consumed by the rename");
         let _ = std::fs::remove_dir_all(&dir);
@@ -6689,20 +6648,18 @@ mod tests {
             TransferGate::Refuse(_)
         ));
 
-        // Upload while the remote listing is still loading -> refuse: remote_entries is
-        // stale/empty, so transfer_dest_exists could miss an existing file and bypass
-        // the overwrite confirm. A download is unaffected (its existence check is the
-        // local filesystem).
+        // Transfers wait for a listing: uploads need fresh overwrite checks and
+        // both directions must serialize with the browser's SFTP worker.
         let mut loading = h2_browser(std::env::temp_dir(), Vec::new());
         loading.remote_loading = true;
         assert!(matches!(
             transfer_gate(&loading, SftpDirection::Put, "x"),
             TransferGate::Refuse(_)
         ));
-        // ...but a DOWNLOAD while loading is still allowed (local existence check).
+        // A download also waits, rather than racing the in-flight listing.
         let mut loading_get = h2_browser(std::env::temp_dir(), Vec::new());
         loading_get.remote_loading = true;
-        assert!(!matches!(
+        assert!(matches!(
             transfer_gate(&loading_get, SftpDirection::Get, "newfile.xyz"),
             TransferGate::Refuse(_)
         ));
@@ -8381,6 +8338,8 @@ mod tests {
             std::env::temp_dir().join(format!("sshm-selection-{}", crate::os::sftp::nonce()));
         std::fs::create_dir(&root).unwrap();
         std::fs::create_dir(root.join("folder")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("folder"), root.join("link")).unwrap();
         for name in ["a", "b", "c"] {
             std::fs::write(root.join(name), name).unwrap();
         }
@@ -8394,7 +8353,32 @@ mod tests {
         b.local_entries = read_local_dir(&root);
         app.sftp_browser = Some(b);
         browser_select(&mut app, true);
-        assert_eq!(app.sftp_browser.as_ref().unwrap().selection.local.len(), 3);
+        assert_eq!(app.sftp_browser.as_ref().unwrap().selection.local.len(), 4);
+        assert!(
+            !app.sftp_browser
+                .as_ref()
+                .unwrap()
+                .selection
+                .local
+                .contains("..")
+        );
+        #[cfg(unix)]
+        assert!(
+            !app.sftp_browser
+                .as_ref()
+                .unwrap()
+                .selection
+                .local
+                .contains("link")
+        );
+        assert!(
+            app.sftp_browser
+                .as_ref()
+                .unwrap()
+                .selection
+                .local
+                .contains("folder")
+        );
         let b = app.sftp_browser.as_mut().unwrap();
         b.local_sel = b.local_entries.iter().position(|e| e.name == "b").unwrap();
         browser_select(&mut app, false);
@@ -8407,7 +8391,31 @@ mod tests {
                 .contains("b")
         );
         browser_select(&mut app, false);
-        assert_eq!(app.sftp_browser.as_ref().unwrap().selection.local.len(), 3);
+        assert_eq!(app.sftp_browser.as_ref().unwrap().selection.local.len(), 4);
+        let b = app.sftp_browser.as_mut().unwrap();
+        b.local_sel = b
+            .local_entries
+            .iter()
+            .position(|e| e.name == "folder")
+            .unwrap();
+        browser_select(&mut app, false);
+        assert!(
+            !app.sftp_browser
+                .as_ref()
+                .unwrap()
+                .selection
+                .local
+                .contains("folder")
+        );
+        browser_select(&mut app, false);
+        assert!(
+            app.sftp_browser
+                .as_ref()
+                .unwrap()
+                .selection
+                .local
+                .contains("folder")
+        );
         app.sftp_browser.as_mut().unwrap().focus = SftpPane::Remote;
         browser_select(&mut app, true);
         assert_eq!(
@@ -8419,7 +8427,7 @@ mod tests {
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>(),
-            vec!["a"]
+            vec!["a", "dir"]
         );
         app.sftp_browser.as_mut().unwrap().focus = SftpPane::Local;
         browser_up(&mut app);
@@ -8431,7 +8439,7 @@ mod tests {
                 .local
                 .is_empty()
         );
-        assert_eq!(app.sftp_browser.as_ref().unwrap().selection.remote.len(), 1);
+        assert_eq!(app.sftp_browser.as_ref().unwrap().selection.remote.len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -8487,5 +8495,48 @@ mod tests {
         b.remote_loading = true;
         assert!(start_browser_batch(&mut app));
         assert!(app.sftp_browser.as_ref().unwrap().selection.batch.is_none());
+    }
+
+    #[test]
+    fn completed_directory_copy_removes_mark_and_failed_copy_keeps_it() {
+        use crate::app::apply_sftp_event;
+        use crate::os::sftp::{SftpEvent, SftpFailure};
+
+        let mut b = h2_browser(std::env::temp_dir(), Vec::new());
+        b.selection.local.insert("folder".into());
+        b.selection.batch = Some(crate::app::BrowserBatch {
+            direction: SftpDirection::Put,
+            remaining: Default::default(),
+            current: Some("folder".into()),
+            started_at: Some(Instant::now()),
+            download_progress: None,
+            single: false,
+            succeeded: 0,
+            failures: Vec::new(),
+            finished: false,
+        });
+        apply_sftp_event(
+            &mut b,
+            SftpEvent::Managed {
+                label: "Copied directory folder".into(),
+                result: Ok(()),
+                refresh_remote: false,
+            },
+        );
+        assert!(!b.selection.local.contains("folder"));
+        assert_eq!(b.selection.batch.as_ref().unwrap().succeeded, 1);
+
+        b.selection.local.insert("folder".into());
+        b.selection.batch.as_mut().unwrap().current = Some("folder".into());
+        apply_sftp_event(
+            &mut b,
+            SftpEvent::Managed {
+                label: "Copied directory folder".into(),
+                result: Err(SftpFailure::from("destination exists".to_string())),
+                refresh_remote: false,
+            },
+        );
+        assert!(b.selection.local.contains("folder"));
+        assert_eq!(b.selection.batch.as_ref().unwrap().failures.len(), 1);
     }
 }

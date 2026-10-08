@@ -54,8 +54,8 @@ Restore/remove only these test files afterward, and unload the test key with ssh
 
 - [ ] Open `b`, transfer one unmarked file with Enter; existing overwrite prompt works.
 - [ ] Mark three files with Insert, toggle the middle one off/on, see `[x]` and count.
-- [ ] `*` marks files but not directories, `..`, remote symlinks or special files.
-- [ ] Enter transfers all marked files sequentially in both directions.
+- [ ] `*` marks files and real directories, but not `..`, symlinks or special files.
+- [ ] Enter copies all marked files and directories sequentially in both directions.
 - [ ] Existing destinations prompt individually; declining preserves the mark.
 - [ ] Make one source unreadable or remove it after marking: the other files finish,
       successful files unmark, failures remain marked, counts are correct. Move the
